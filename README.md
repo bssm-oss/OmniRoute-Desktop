@@ -1,11 +1,19 @@
+<p align="center"><img src="build/icon.png" width="112" alt="OmniRoute Desktop"></p>
+
 # OmniRoute Desktop
 
 OmniRoute(OpenAI 호환 엔드포인트) URL과 API Key만 넣으면 Claude Desktop / Codex 앱처럼 동작하는 **코딩 에이전트 데스크톱 앱** (Electron).
+OmniRoute용으로 만들었지만 OpenAI 호환 `/v1/chat/completions` 엔드포인트라면 어디든 연결할 수 있습니다.
 
-## 빌드된 앱 실행
+## 다운로드
 
-- 바탕화면 **OmniRoute Desktop** 바로가기 → `app\OmniRoute Desktop.exe`
-- 단일 파일: `OmniRoute Desktop 0.2.0 (portable).exe` (Windows 스마트 앱 컨트롤이 켜져 있으면 서명되지 않은 단일 exe가 차단될 수 있음 → `app` 폴더 버전 사용)
+[Releases](https://github.com/bssm-oss/OmniRoute-Desktop/releases/latest)에서 받으세요.
+
+- `OmniRoute-Desktop-Setup-<버전>.exe`: 설치형 (권장)
+- `OmniRoute-Desktop-<버전>-win-x64.zip`: 압축 해제 후 `OmniRoute Desktop.exe` 실행
+- `OmniRoute-Desktop-<버전>-portable.exe`: 단일 실행 파일
+
+> 아직 코드 서명이 되어 있지 않아 Windows SmartScreen 경고가 나올 수 있습니다("추가 정보 → 실행"). 스마트 앱 컨트롤이 켜져 있으면 차단될 수 있으니 이때는 zip 버전을 사용하세요.
 
 ## 개발 실행
 
