@@ -1,0 +1,29 @@
+# dependencies
+node_modules/
+
+# build outputs / local installs (large binaries, never commit)
+app/
+app-backup-*/
+test-build/
+dist/
+*.exe
+*.asar
+*.blockmap
+*.old-*
+
+# secrets / local config
+.env
+.env.*
+*.pem
+*.key
+*.pfx
+*.p12
+
+# logs / OS / editor junk
+*.log
+npm-debug.log*
+.DS_Store
+Thumbs.db
+desktop.ini
+.vscode/
+.idea/

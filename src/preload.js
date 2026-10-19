@@ -1,0 +1,61 @@
+const { contextBridge, ipcRenderer, webUtils } = require('electron');
+
+const invoke = (ch, ...args) => ipcRenderer.invoke(ch, ...args);
+
+contextBridge.exposeInMainWorld('api', {
+  getSettings: () => invoke('settings:get'),
+  setSettings: (patch) => invoke('settings:set', patch),
+  listModels: (override) => invoke('models:list', override),
+
+  pickWorkspace: () => invoke('workspace:pick'),
+  setWorkspace: (dir) => invoke('workspace:set', dir),
+  listDir: (dir) => invoke('fs:list', dir),
+  readFile: (p) => invoke('fs:read', p),
+  writeFile: (p, c) => invoke('fs:write', p, c),
+  reveal: (p) => invoke('fs:reveal', p),
+  openExternal: (p) => invoke('fs:openExternal', p),
+  attachDialog: () => invoke('dialog:attach'),
+  attachPath: (p) => invoke('fs:attachPath', p),
+  pathForFile: (file) => webUtils.getPathForFile(file),
+
+  listConversations: () => invoke('conv:list'),
+  searchConversations: (q) => invoke('conv:search', q),
+  exportConversation: (id, filePath) => invoke('conv:export', id, filePath),
+  getConversation: (id) => invoke('conv:get', id),
+  createConversation: () => invoke('conv:create'),
+  deleteConversation: (id) => invoke('conv:delete', id),
+  renameConversation: (id, t) => invoke('conv:rename', id, t),
+  setConversationModel: (id, m) => invoke('conv:setModel', id, m),
+  truncateConversation: (id, i) => invoke('conv:truncate', id, i),
+  setConversationMode: (id, mode, agentName) => invoke('conv:setMode', id, mode, agentName),
+  compactConversation: (id) => invoke('conv:compact', id),
+
+  customSummary: () => invoke('custom:summary'),
+  installPlugin: (src) => invoke('custom:installPlugin', src),
+  linkPlugin: () => invoke('custom:linkPlugin'),
+  uninstallPlugin: (name) => invoke('custom:uninstallPlugin', name),
+  toggleCustom: (kind, name, enabled) => invoke('custom:toggle', kind, name, enabled),
+  createCustom: (kind, name, desc) => invoke('custom:create', kind, name, desc),
+  openPath: (p) => invoke('custom:openPath', p),
+  openUserRoot: () => invoke('custom:openUserRoot'),
+  mcpStatus: (restart) => invoke('mcp:status', restart),
+
+  send: (payload) => invoke('agent:send', payload),
+  approve: (payload) => invoke('agent:approve', payload),
+  stop: (convId) => invoke('agent:stop', convId),
+  running: () => invoke('agent:running'),
+  pending: (convId) => invoke('agent:pending', convId),
+  steer: (payload) => invoke('agent:steer', payload),
+  releaseWait: (payload) => invoke('agent:releaseWait', payload),
+  queueList: (convId) => invoke('agent:queueList', convId),
+  queueEdit: (payload) => invoke('agent:queueEdit', payload),
+  queueDelete: (payload) => invoke('agent:queueDelete', payload),
+  queueMove: (payload) => invoke('agent:queueMove', payload),
+  queueToSteer: (payload) => invoke('agent:queueToSteer', payload),
+  queueRunNext: (convId) => invoke('agent:queueRunNext', convId),
+  emergencyShortcut: () => invoke('app:emergencyShortcut'),
+  appInfo: () => invoke('app:info'),
+
+  onAgentEvent: (cb) => ipcRenderer.on('agent:event', (_e, ev) => cb(ev)),
+  onConvUpdated: (cb) => ipcRenderer.on('conv:updated', (_e, ev) => cb(ev))
+});

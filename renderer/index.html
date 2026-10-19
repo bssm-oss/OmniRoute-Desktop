@@ -1,0 +1,224 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="utf-8" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'none'; font-src 'self' data:"
+    />
+    <title>OmniRoute Desktop</title>
+    <link rel="icon" type="image/png" href="icon.png" />
+    <link rel="stylesheet" href="styles.css" />
+    <script src="../node_modules/marked/lib/marked.umd.js"></script>
+    <script src="../node_modules/dompurify/dist/purify.min.js"></script>
+  </head>
+  <body>
+    <div id="app">
+      <!-- Sidebar -->
+      <aside id="sidebar">
+        <div class="sidebar-head">
+          <div class="brand"><img class="logo" src="icon.png" alt="" /> OmniRoute</div>
+          <button id="btn-new" class="btn primary small" title="새 대화 (Ctrl+N)">＋ 새 대화</button>
+        </div>
+        <div class="tabs">
+          <button class="tab active" data-tab="chats">대화</button>
+          <button class="tab" data-tab="files">파일</button>
+        </div>
+        <div id="tab-chats" class="tab-body">
+          <input id="conv-search" type="search" placeholder="🔍 대화 검색 (제목·내용)" />
+          <ul id="conv-list"></ul>
+        </div>
+        <div id="tab-files" class="tab-body hidden">
+          <div class="files-head">
+            <span id="ws-name" class="muted">폴더 없음</span>
+            <span class="spacer"></span>
+            <button id="btn-refresh-tree" class="icon-btn" title="새로고침">⟳</button>
+            <button id="btn-reveal" class="icon-btn" title="탐색기에서 열기">⇱</button>
+          </div>
+          <div id="file-tree"></div>
+        </div>
+        <div class="sidebar-foot">
+          <button id="btn-settings" class="btn ghost small">⚙ 설정</button>
+          <span id="conn-status" class="status-dot" title="연결 상태"></span>
+        </div>
+      </aside>
+
+      <!-- Main -->
+      <main id="main">
+        <header id="topbar">
+          <button id="btn-workspace" class="chip" title="작업 폴더 선택">📁 <span id="ws-label">폴더 열기</span></button>
+          <select id="model-select" title="모델"></select>
+          <button id="btn-reload-models" class="icon-btn" title="모델 목록 새로고침">⟳</button>
+          <div id="mode-group" class="seg" title="모드">
+            <button data-mode="ask" title="질문/설명 (읽기 전용)">💬 Ask</button>
+            <button data-mode="plan" title="조사 후 구현 계획 작성 (읽기 전용)">🗺 Plan</button>
+            <button data-mode="agent" title="자율 코딩 에이전트">🛠 Agent</button>
+            <button data-mode="autopilot" title="완료될 때까지 자율 실행 (task_complete)">🚀 Autopilot</button>
+          </div>
+          <select id="agent-select" title="커스텀 에이전트 (.agent.md)"></select>
+          <span class="spacer"></span>
+          <button id="btn-export" class="icon-btn" title="현재 대화를 Markdown으로 내보내기">⤓</button>
+          <button id="btn-theme" class="icon-btn" title="라이트/다크 테마 전환">◐</button>
+          <button id="btn-extensions" class="btn ghost small" title="스킬 · 에이전트 · 프롬프트 · 플러그인 · MCP · 훅">🧩 확장</button>
+          <select id="perm-select" title="권한 모드">
+            <option value="ask">🛡 매번 확인</option>
+            <option value="auto-edit">✎ 워크스페이스 편집 자동</option>
+            <option value="full">⚡ 전체 자동 (주의)</option>
+          </select>
+          <label class="toggle" title="Computer Use (화면/마우스/키보드 제어)">
+            <input type="checkbox" id="cu-toggle" />
+            <span>🖥 Computer Use</span>
+          </label>
+          <button id="btn-toggle-panel" class="icon-btn" title="파일 패널">▤</button>
+        </header>
+
+        <div id="content">
+          <section id="chat">
+            <div id="messages"></div>
+            <div id="empty" class="empty hidden">
+              <img class="empty-logo" src="icon.png" alt="" />
+              <h2>무엇을 만들어 볼까요?</h2>
+              <p class="muted">작업 폴더를 열고 요청하면 파일을 읽고, 수정하고, 명령을 실행합니다.</p>
+              <div class="suggestions">
+                <button class="sugg">이 프로젝트 구조를 분석하고 요약해줘</button>
+                <button class="sugg">테스트를 실행하고 실패한 걸 고쳐줘</button>
+                <button class="sugg">README.md를 작성해줘</button>
+                <button class="sugg">화면 스크린샷을 찍고 지금 무엇이 열려있는지 알려줘</button>
+              </div>
+            </div>
+            <div id="composer">
+              <div id="todos" class="hidden"></div>
+              <div id="queue" class="hidden"></div>
+              <div id="slash-menu" class="hidden"></div>
+              <div id="attachments"></div>
+              <div class="composer-box">
+                <button id="btn-attach" class="icon-btn" title="파일 첨부">📎</button>
+                <textarea id="input" rows="1" placeholder="메시지 입력 — / 로 프롬프트·스킬·에이전트 호출 (Enter 전송, Shift+Enter 줄바꿈)"></textarea>
+                <button id="btn-steer" class="btn hidden" title="Ctrl+Enter: 진행 중인 작업에 지금 지시 추가 (다음 도구 호출 경계에서 반영)">🧭 Steer</button>
+                <button id="btn-steer-now" class="btn hidden" title="Ctrl+Shift+Enter: 실행 중인 도구를 즉시 중단하고 바로 방향 전환">⚡ 즉시 Steer</button>
+                <button id="btn-send" class="btn primary">전송</button>
+                <button id="btn-stop" class="btn danger hidden">중지</button>
+              </div>
+              <div class="composer-hint muted">
+                <span id="hint-text"></span>
+                <span class="spacer"></span>
+                <span id="ctx-usage" title="누적 토큰 사용량"></span>
+                <button id="btn-compact" class="link-btn" title="대화 컨텍스트 요약/압축">🗜 압축</button>
+              </div>
+            </div>
+          </section>
+
+          <section id="panel" class="hidden">
+            <div class="panel-head">
+              <span id="panel-title" class="mono">파일</span>
+              <span class="spacer"></span>
+              <button id="btn-panel-mention" class="btn ghost small" title="대화에 첨부">＠ 첨부</button>
+              <button id="btn-panel-open" class="btn ghost small" title="기본 앱으로 열기">열기</button>
+              <button id="btn-panel-save" class="btn primary small hidden">저장</button>
+              <button id="btn-panel-close" class="icon-btn">✕</button>
+            </div>
+            <div id="panel-body"></div>
+          </section>
+        </div>
+      </main>
+    </div>
+
+    <!-- Settings modal -->
+    <div id="settings-modal" class="modal hidden">
+      <div class="modal-card">
+        <h2>설정</h2>
+        <label>OmniRoute URL
+          <input id="set-url" type="text" placeholder="http://localhost:20128/v1" />
+          <small class="muted">OpenAI 호환 엔드포인트. /v1 은 자동으로 붙습니다.</small>
+        </label>
+        <label>API Key
+          <div class="row">
+            <input id="set-key" type="password" placeholder="sk-..." />
+            <button id="btn-show-key" class="btn ghost small" type="button">보기</button>
+          </div>
+          <small class="muted">OS 보안 저장소(safeStorage)로 암호화되어 저장됩니다.</small>
+        </label>
+        <div class="row">
+          <button id="btn-test" class="btn ghost small" type="button">연결 테스트 & 모델 불러오기</button>
+          <span id="test-result" class="muted"></span>
+        </div>
+        <label>기본 모델
+          <input id="set-model" type="text" list="model-datalist" placeholder="예: cc/claude-sonnet-4-5 또는 콤보 이름" />
+          <datalist id="model-datalist"></datalist>
+        </label>
+        <div class="grid2">
+          <label>Temperature (비우면 기본값)
+            <input id="set-temp" type="number" step="0.1" min="0" max="2" />
+          </label>
+          <label>Max tokens (비우면 기본값)
+            <input id="set-maxtok" type="number" min="1" />
+          </label>
+          <label>최대 에이전트 스텝
+            <input id="set-steps" type="number" min="1" max="500" />
+          </label>
+        </div>
+        <h3>하네스 / Autopilot</h3>
+        <div class="grid2">
+          <label>새 대화 기본 모드
+            <select id="set-defmode">
+              <option value="ask">Ask</option>
+              <option value="plan">Plan</option>
+              <option value="agent">Agent</option>
+              <option value="autopilot">Autopilot</option>
+            </select>
+          </label>
+          <label>컨텍스트 한도 (tokens, 80%에서 자동 압축)
+            <input id="set-ctx" type="number" min="8000" step="1000" />
+          </label>
+          <label>Autopilot 재촉 최대 횟수
+            <input id="set-nudges" type="number" min="0" max="50" />
+          </label>
+        </div>
+        <label>서브에이전트 모델 (비우면 현재 모델)
+          <input id="set-submodel" type="text" list="model-datalist" placeholder="예: 빠르고 저렴한 모델" />
+        </label>
+        <label class="check"><input id="set-apauto" type="checkbox" /> Autopilot 모드에서는 도구 승인 없이 자동 실행</label>
+        <label class="check"><input id="set-outside" type="checkbox" /> 전체 권한 모드에서도 작업 폴더 밖 경로에 접근하는 명령은 승인 요청</label>
+        <h3 class="set-section">Computer Use · 백그라운드 작업 표시</h3>
+        <label class="check"><input id="set-cu-minimize" type="checkbox" /> 화면 조작 시작 시 앱 창 최소화 (끝나도 포커스를 가져오지 않음)</label>
+        <label class="check"><input id="set-cu-countdown-on" type="checkbox" /> 화면 조작 시작 전 카운트다운 알림 (취소 가능)
+          <input id="set-cu-countdown" type="number" min="1" max="10" style="width:56px;margin-left:6px" />초</label>
+        <label class="check"><input id="set-cu-badge" type="checkbox" /> 화면 조작 중 화면 구석에 작업 중 배지 표시 (클릭 통과)</label>
+        <label class="check"><input id="set-ind-taskbar" type="checkbox" /> 작업 중 작업표시줄 진행 표시 · 트레이 아이콘</label>
+        <label class="check"><input id="set-attn" type="checkbox" /> 승인 필요/작업 완료 시 작업표시줄 깜빡임 + 데스크톱 알림 (포커스는 뺏지 않음)</label>
+        <label>사용자 지정 지침 (시스템 프롬프트에 추가)
+          <textarea id="set-instr" rows="4" placeholder="예: 항상 한국어로 답변하고, TypeScript strict 모드를 지켜줘."></textarea>
+        </label>
+        <div class="modal-actions">
+          <button id="btn-settings-cancel" class="btn ghost">취소</button>
+          <button id="btn-settings-save" class="btn primary">저장</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Extensions modal -->
+    <div id="ext-modal" class="modal hidden">
+      <div class="modal-card wide">
+        <div class="row">
+          <h2 style="margin:0">🧩 확장</h2>
+          <span class="spacer"></span>
+          <button id="btn-ext-folder" class="btn ghost small">~/.omniroute 열기</button>
+          <button id="btn-ext-close" class="icon-btn">✕</button>
+        </div>
+        <div class="tabs ext-tabs">
+          <button class="etab active" data-etab="skills">스킬</button>
+          <button class="etab" data-etab="agents">에이전트</button>
+          <button class="etab" data-etab="prompts">프롬프트</button>
+          <button class="etab" data-etab="plugins">플러그인</button>
+          <button class="etab" data-etab="mcp">MCP</button>
+          <button class="etab" data-etab="hooks">훅</button>
+          <button class="etab" data-etab="instructions">지침</button>
+        </div>
+        <div id="ext-body"></div>
+      </div>
+    </div>
+
+    <div id="toast" class="toast hidden"></div>
+    <script src="app.js"></script>
+  </body>
+</html>

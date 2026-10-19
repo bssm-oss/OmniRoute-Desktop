@@ -1,0 +1,53 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <!-- OmniRoute Desktop icon: an "O" orbit of model providers, routed through one central hub. -->
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#1b1f2b"/>
+      <stop offset="1" stop-color="#0b0d12"/>
+    </linearGradient>
+    <linearGradient id="ring" x1="0.1" y1="0" x2="0.9" y2="1">
+      <stop offset="0" stop-color="#9aa6ff"/>
+      <stop offset="0.55" stop-color="#5a6bff"/>
+      <stop offset="1" stop-color="#2fd3c8"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="0.5" cy="0.5" r="0.5">
+      <stop offset="0" stop-color="#7c8cff" stop-opacity="0.45"/>
+      <stop offset="1" stop-color="#7c8cff" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="shine" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffffff" stop-opacity="0.10"/>
+      <stop offset="0.5" stop-color="#ffffff" stop-opacity="0"/>
+    </linearGradient>
+  </defs>
+
+  <!-- tile -->
+  <rect x="48" y="48" width="928" height="928" rx="212" fill="url(#bg)"/>
+  <rect x="48" y="48" width="928" height="928" rx="212" fill="url(#shine)"/>
+  <rect x="49.5" y="49.5" width="925" height="925" rx="210.5" fill="none" stroke="#ffffff" stroke-opacity="0.08" stroke-width="3"/>
+
+  <!-- soft glow behind the hub -->
+  <circle cx="512" cy="512" r="300" fill="url(#glow)"/>
+
+  <!-- routes: three providers on the orbit feed the hub -->
+  <g stroke="url(#ring)" stroke-width="34" stroke-linecap="round" fill="none" opacity="0.9">
+    <path d="M512 512 L512 222"/>
+    <path d="M512 512 L261 657"/>
+    <path d="M512 512 L763 657"/>
+  </g>
+
+  <!-- the "O" orbit, with a gap where the route exits to the user -->
+  <circle cx="512" cy="512" r="290" fill="none" stroke="url(#ring)" stroke-width="64"
+          stroke-linecap="round" stroke-dasharray="1610 212" transform="rotate(-62 512 512)"/>
+
+  <!-- provider nodes -->
+  <g fill="#0f1115" stroke="#e8ebff" stroke-width="22">
+    <circle cx="512" cy="222" r="46"/>
+    <circle cx="261" cy="657" r="46"/>
+    <circle cx="763" cy="657" r="46"/>
+  </g>
+
+  <!-- central router hub -->
+  <circle cx="512" cy="512" r="96" fill="url(#ring)"/>
+  <circle cx="512" cy="512" r="40" fill="#0f1115"/>
+  <circle cx="512" cy="512" r="16" fill="#e8ebff"/>
+</svg>

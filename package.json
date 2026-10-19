@@ -1,0 +1,62 @@
+{
+    "name":  "omniroute-desktop",
+    "productName":  "OmniRoute Desktop",
+    "version":  "0.2.0",
+    "description":  "Coding agent desktop app powered by an OmniRoute (OpenAI-compatible) endpoint, with file access, shell and computer use.",
+    "main":  "src/main.js",
+    "scripts":  {
+                    "start":  "electron .",
+                    "check":  "node scripts/check.js",
+                    "dist":  "electron-builder",
+                    "dist:win":  "electron-builder --win portable dir",
+                    "test":  "node scripts/test-harness.js",
+                    "smoke":  "node scripts/smoke.js",
+                    "test:live":  "node scripts/live-test.js",
+                    "test:e2e":  "node scripts/e2e-ui.js",
+                    "build:test":  "node scripts/build-test.js",
+                    "test:mm":  "electron scripts/test-multimonitor.js",
+                    "icon":  "electron scripts/make-icon.js"
+                },
+    "author":  "",
+    "license":  "MIT",
+    "build":  {
+                  "appId":  "dev.omniroute.desktop",
+                  "productName":  "OmniRoute Desktop",
+                  "files":  [
+                                "src/**/*",
+                                "renderer/**/*",
+                                "package.json"
+                            ],
+                  "win":  {
+                              "target":  [
+                                             "nsis",
+                                             "portable"
+                                         ],
+                              "icon":  "build/icon.ico"
+                          },
+                  "mac":  {
+                              "target":  "dmg",
+                              "category":  "public.app-category.developer-tools",
+                              "icon":  "build/icon.png"
+                          },
+                  "linux":  {
+                                "target":  "AppImage",
+                                "icon":  "build/icon.png"
+                            },
+                  "directories":  {
+                                      "output":  "dist"
+                                  }
+              },
+    "dependencies":  {
+                         "dompurify":  "^3.4.17",
+                         "marked":  "^18.1.1",
+                         "yaml":  "^2.9.1"
+                     },
+    "devDependencies":  {
+                            "electron":  "^44.9.0",
+                            "electron-builder":  "^26.15.3"
+                        },
+    "allowScripts":  {
+                         "electron-winstaller@5.4.0":  true
+                     }
+}
