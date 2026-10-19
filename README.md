@@ -5,6 +5,10 @@
 OmniRoute(OpenAI 호환 엔드포인트) URL과 API Key만 넣으면 Claude Desktop / Codex 앱처럼 동작하는 **코딩 에이전트 데스크톱 앱** (Electron).
 OmniRoute용으로 만들었지만 OpenAI 호환 `/v1/chat/completions` 엔드포인트라면 어디든 연결할 수 있습니다.
 
+> 💛 **커뮤니티 프로젝트입니다. OmniRoute 공식 릴리스가 아닙니다.**
+> [OmniRoute](https://github.com/diegosouzapw/OmniRoute)(© diegosouzapw, MIT)와 제휴·후원·보증 관계가 없습니다. "OmniRoute" 이름은 연결 대상 서비스를 가리키기 위해서만 사용합니다.
+> OmniRoute 서버 자체를 데스크톱에서 실행하는 **공식 데스크톱 앱**은 [OmniRoute 저장소의 `electron/`](https://github.com/diegosouzapw/OmniRoute/blob/main/docs/guides/ELECTRON_GUIDE.md)을 보세요. 이 앱은 그 서버(또는 다른 OpenAI 호환 엔드포인트)에 **접속해서 쓰는 코딩 에이전트 클라이언트**입니다.
+
 ## 다운로드
 
 [Releases](https://github.com/bssm-oss/OmniRoute-Desktop/releases/latest)에서 받으세요.
