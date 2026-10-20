@@ -101,6 +101,20 @@ function openSettings() {
   $('#set-cu-badge').checked = s.cuBadge !== false;
   $('#set-ind-taskbar').checked = s.taskbarIndicator !== false;
   $('#set-attn').checked = s.attentionNotify !== false;
+  $('#set-block-danger').checked = s.blockDangerousCommands !== false;
+  $('#set-checkpoints').checked = s.checkpoints !== false;
+  $('#set-fallback').value = (Array.isArray(s.fallbackModels) ? s.fallbackModels : String(s.fallbackModels || '').split(',')).filter(Boolean).join(', ');
+  $('#set-verify').value = s.verifyCommand || '';
+  $('#set-require-todos').checked = s.requireTodosDone !== false;
+  $('#set-maxtokens-run').value = s.maxRunTokens || 0;
+  $('#set-maxminutes').value = s.maxRunMinutes || 0;
+  $('#set-retries').value = s.runRetries ?? 2;
+  $('#set-errstreak').value = s.maxErrorStreak ?? 8;
+  $('#set-continue-steps').checked = s.continueAfterMaxSteps !== false;
+  $('#set-autoresume').checked = s.autoResume !== false;
+  $('#set-memory').checked = s.memoryEnabled !== false;
+  $('#set-websearch').checked = s.webSearch !== false;
+  $('#set-searchurl').value = s.searchUrl || '';
   $('#test-result').textContent = '';
   fillDatalist();
   $('#settings-modal').classList.remove('hidden');
@@ -134,7 +148,21 @@ async function saveSettings() {
     cuCountdownSeconds: Math.max(1, Math.min(10, num($('#set-cu-countdown').value) || 3)),
     cuBadge: $('#set-cu-badge').checked,
     taskbarIndicator: $('#set-ind-taskbar').checked,
-    attentionNotify: $('#set-attn').checked
+    attentionNotify: $('#set-attn').checked,
+    blockDangerousCommands: $('#set-block-danger').checked,
+    checkpoints: $('#set-checkpoints').checked,
+    fallbackModels: $('#set-fallback').value.split(',').map((x) => x.trim()).filter(Boolean),
+    verifyCommand: $('#set-verify').value.trim(),
+    requireTodosDone: $('#set-require-todos').checked,
+    maxRunTokens: Math.max(0, num($('#set-maxtokens-run').value) || 0),
+    maxRunMinutes: Math.max(0, num($('#set-maxminutes').value) || 0),
+    runRetries: Math.max(0, Math.min(10, num($('#set-retries').value) ?? 2)),
+    maxErrorStreak: Math.max(0, num($('#set-errstreak').value) ?? 8),
+    continueAfterMaxSteps: $('#set-continue-steps').checked,
+    autoResume: $('#set-autoresume').checked,
+    memoryEnabled: $('#set-memory').checked,
+    webSearch: $('#set-websearch').checked,
+    searchUrl: $('#set-searchurl').value.trim()
   });
   $('#settings-modal').classList.add('hidden');
   await loadModels();
@@ -152,6 +180,211 @@ async function testConnection() {
   } catch (e) {
     $('#test-result').textContent = '❌ ' + cleanErr(e);
   }
+}
+
+// ---------------- Tool modal: checkpoints / background / schedules / memory ----------------
+
+function openToolModal(title) {
+  $('#tool-modal-title').textContent = title;
+  const body = $('#tool-modal-body');
+  body.innerHTML = '';
+  $('#tool-modal').classList.remove('hidden');
+  return body;
+}
+
+function fmtTime(t) {
+  return t ? new Date(t).toLocaleString() : '-';
+}
+
+async function openCheckpoints() {
+  if (!state.conv) return toast('대화를 먼저 선택하세요.', true);
+  const body = openToolModal('↶ 체크포인트 — 파일 변경 되돌리기');
+  const list = await window.api.checkpoints(state.conv.id);
+  if (!list.length) {
+    body.appendChild(el('p', 'muted', '이 대화에서 에이전트가 변경한 파일 기록이 없습니다. (설정 > 파일 체크포인트)'));
+    return;
+  }
+  body.appendChild(el('p', 'muted', '선택한 실행과 그 이후의 모든 파일 변경을 되돌립니다 (대화 내용은 유지). 에이전트가 run_command로 변경한 파일은 포함되지 않습니다.'));
+  for (const cp of list) {
+    const card = el('div', 'tool-row');
+    const head = el('div', 'row');
+    head.appendChild(el('b', '', fmtTime(cp.time)));
+    head.appendChild(el('span', 'muted', ` — ${cp.label || '(실행)'} · 파일 ${cp.files.length}개${cp.truncated ? ' (일부만)' : ''}`));
+    head.appendChild(el('span', 'spacer'));
+    const btn = el('button', 'btn small danger', '여기까지 되돌리기');
+    btn.onclick = async () => {
+      if (!confirm(`${cp.files.length}개 파일을 이 실행 이전 상태로 되돌릴까요? (이후 실행의 변경도 함께 되돌려집니다)`)) return;
+      try {
+        const r = await window.api.restoreCheckpoint({ convId: state.conv.id, turnId: cp.id });
+        toast(`되돌림: 복원 ${r.restored.length} · 삭제 ${r.removed.length}${r.skipped.length ? ' · 건너뜀 ' + r.skipped.length : ''}`);
+        loadTree();
+        openCheckpoints();
+      } catch (e) {
+        toast(cleanErr(e), true);
+      }
+    };
+    head.appendChild(btn);
+    card.appendChild(head);
+    const files = el('div', 'mono small muted');
+    files.textContent = cp.files.slice(0, 30).map((f) => `${f.existed ? '✎' : '＋'} ${relPath(f.path)}${f.skipped ? ' (백업 안 됨: ' + f.skipped + ')' : ''}`).join('\n') + (cp.files.length > 30 ? `\n… +${cp.files.length - 30}` : '');
+    files.style.whiteSpace = 'pre-wrap';
+    card.appendChild(files);
+    body.appendChild(card);
+  }
+}
+
+async function refreshBgCount() {
+  try {
+    const n = (await window.api.bgList()).filter((p) => p.running).length;
+    const b = $('#bg-count');
+    b.textContent = String(n);
+    b.classList.toggle('hidden', !n);
+  } catch {}
+}
+
+async function openBackground() {
+  const body = openToolModal('⚙ 백그라운드 프로세스');
+  const list = await window.api.bgList();
+  refreshBgCount();
+  if (!list.length) {
+    body.appendChild(el('p', 'muted', '에이전트가 bg_start 로 시작한 프로세스가 없습니다.'));
+    return;
+  }
+  for (const p of list.reverse()) {
+    const card = el('div', 'tool-row');
+    const head = el('div', 'row');
+    head.appendChild(el('b', '', `${p.running ? '🟢' : '⚪'} ${p.id}${p.name ? ' · ' + p.name : ''}`));
+    head.appendChild(el('span', 'muted mono', ' ' + p.command.slice(0, 120)));
+    head.appendChild(el('span', 'spacer'));
+    const out = el('pre', 'bg-out hidden');
+    const view = el('button', 'btn small ghost', '출력');
+    view.onclick = async () => {
+      out.textContent = await window.api.bgOutput(p.id);
+      out.classList.toggle('hidden');
+      out.scrollTop = out.scrollHeight;
+    };
+    head.appendChild(view);
+    if (p.running) {
+      const stop = el('button', 'btn small danger', '중지');
+      stop.onclick = async () => {
+        await window.api.bgStop(p.id);
+        setTimeout(openBackground, 400);
+      };
+      head.appendChild(stop);
+    } else head.appendChild(el('span', 'muted', ` 종료 (${p.exitCode})`));
+    card.append(head, out);
+    body.appendChild(card);
+  }
+}
+
+async function openSchedules() {
+  const body = openToolModal('⏰ 예약 작업 · 🧠 메모리');
+  body.appendChild(el('h3', '', '예약 작업'));
+  body.appendChild(el('p', 'muted', '앱이 실행 중일 때 지정한 시각/간격마다 새 대화에서 프롬프트를 자동 실행합니다 (기본 Autopilot).'));
+  const list = await window.api.scheduleList();
+  for (const s of list) {
+    const row = el('div', 'tool-row');
+    const head = el('div', 'row');
+    const en = el('input');
+    en.type = 'checkbox';
+    en.checked = s.enabled !== false;
+    en.onchange = async () => {
+      await window.api.scheduleSave({ ...s, enabled: en.checked, next: undefined, label: undefined });
+      openSchedules();
+    };
+    head.appendChild(en);
+    head.appendChild(el('b', '', ' ' + (s.name || s.prompt.slice(0, 40))));
+    head.appendChild(el('span', 'muted', ` · ${s.label} · ${s.mode || 'autopilot'} · 다음: ${s.enabled !== false && s.next ? fmtTime(s.next) : '-'} · 최근: ${fmtTime(s.lastRun)}`));
+    head.appendChild(el('span', 'spacer'));
+    const run = el('button', 'btn small ghost', '지금 실행');
+    run.onclick = async () => {
+      const id = await window.api.scheduleRunNow(s.id);
+      $('#tool-modal').classList.add('hidden');
+      await loadConversations();
+      openConversation(id);
+    };
+    const del = el('button', 'btn small danger', '삭제');
+    del.onclick = async () => {
+      if (!confirm('이 예약을 삭제할까요?')) return;
+      await window.api.scheduleDelete(s.id);
+      openSchedules();
+    };
+    head.append(run, del);
+    row.appendChild(head);
+    row.appendChild(el('div', 'mono small muted', s.prompt.slice(0, 300)));
+    body.appendChild(row);
+  }
+  // New schedule form
+  const form = el('div', 'tool-row sched-form');
+  form.innerHTML = `
+    <div class="grid2">
+      <label>이름 <input id="sch-name" type="text" placeholder="예: 야간 테스트 점검" /></label>
+      <label>유형
+        <select id="sch-kind"><option value="interval">간격 (분)</option><option value="daily">매일 시각</option><option value="once">1회</option></select>
+      </label>
+      <label>간격(분) / 시각(HH:MM) / 일시
+        <input id="sch-when" type="text" placeholder="60 · 09:30 · 2026-10-20 09:00" />
+      </label>
+      <label>모드
+        <select id="sch-mode"><option value="autopilot">Autopilot</option><option value="agent">Agent</option><option value="plan">Plan</option><option value="ask">Ask</option></select>
+      </label>
+    </div>
+    <label>작업 폴더 (비우면 현재 폴더) <input id="sch-ws" type="text" /></label>
+    <label>프롬프트 <textarea id="sch-prompt" rows="3" placeholder="예: 테스트를 실행하고 실패한 것이 있으면 고친 뒤 커밋해줘"></textarea></label>
+    <div class="row"><span class="spacer"></span><button id="sch-add" class="btn primary small">예약 추가</button></div>`;
+  body.appendChild(form);
+  $('#sch-ws').value = state.settings.workspace || '';
+  $('#sch-add').onclick = async () => {
+    const kind = $('#sch-kind').value;
+    const when = $('#sch-when').value.trim();
+    const item = { name: $('#sch-name').value.trim(), kind, mode: $('#sch-mode').value, prompt: $('#sch-prompt').value.trim(), workspace: $('#sch-ws').value.trim() };
+    if (kind === 'interval') item.everyMinutes = Number(when);
+    else if (kind === 'daily') item.time = when;
+    else {
+      const t = new Date(when.replace(' ', 'T')).getTime();
+      if (!t || t < Date.now()) return toast('1회 일시는 미래의 "YYYY-MM-DD HH:MM" 형식이어야 합니다.', true);
+      item.at = t;
+    }
+    try {
+      await window.api.scheduleSave(item);
+      toast('예약이 추가되었습니다.');
+      openSchedules();
+    } catch (e) {
+      toast(cleanErr(e), true);
+    }
+  };
+
+  // Memory
+  body.appendChild(el('h3', '', '🧠 장기 메모리'));
+  body.appendChild(el('p', 'muted', '에이전트가 memory 도구로 저장한 사실입니다. 모든 대화의 시스템 프롬프트에 포함됩니다.'));
+  const mem = await window.api.memoryList();
+  if (!mem.length) body.appendChild(el('p', 'muted', '(비어 있음)'));
+  for (const m of mem) {
+    const row = el('div', 'row tool-row');
+    row.appendChild(el('span', 'badge', m.scope === 'project' ? '프로젝트' : '사용자'));
+    row.appendChild(el('span', '', ' ' + m.text));
+    row.appendChild(el('span', 'spacer'));
+    const del = el('button', 'btn small ghost', '삭제');
+    del.onclick = async () => {
+      await window.api.memoryRemove({ scope: m.scope, id: m.id });
+      openSchedules();
+    };
+    row.appendChild(del);
+    body.appendChild(row);
+  }
+  const add = el('div', 'row');
+  add.innerHTML = '<select id="mem-scope"><option value="user">사용자</option><option value="project">프로젝트</option></select><input id="mem-text" type="text" placeholder="기억할 내용" style="flex:1" /><button id="mem-add" class="btn small">추가</button>';
+  body.appendChild(add);
+  $('#mem-add').onclick = async () => {
+    const text = $('#mem-text').value.trim();
+    if (!text) return;
+    try {
+      await window.api.memoryAdd({ scope: $('#mem-scope').value, text });
+      openSchedules();
+    } catch (e) {
+      toast(cleanErr(e), true);
+    }
+  };
 }
 
 function cleanErr(e) {
@@ -976,8 +1209,20 @@ function handleEvent(ev) {
       scrollBottom();
       break;
     }
-    case 'notice':
-      ensureLive().wrap.appendChild(el('div', 'notice', ev.text));
+    case 'notice': {
+      const n = el('div', 'notice' + (/^⛔/.test(ev.text || '') ? ' diag' : ''), ev.text);
+      if (/\n/.test(ev.text || '')) n.style.whiteSpace = 'pre-wrap';
+      ensureLive().wrap.appendChild(n);
+      if (/^(🛡|⛔|🚫)/.test(ev.text || '')) scrollBottom(true);
+      break;
+    }
+    case 'run_diagnosis':
+      if (state.live) {
+        const d = [...state.live.wrap.querySelectorAll('.notice.diag')].pop();
+        if (d) d.remove(); // shown as the persisted assistant message instead
+      }
+      break;
+    case 'model_switched':
       break;
     case 'error': {
       if (/HTTP \d|fetch failed|ECONN|ENOTFOUND|network/i.test(ev.message || '')) setConn('err', '채팅 요청 실패: ' + ev.message.slice(0, 200));
@@ -1840,6 +2085,11 @@ function bind() {
   $('#btn-ext-folder').onclick = () => window.api.openUserRoot();
   document.querySelectorAll('.etab').forEach((t) => (t.onclick = () => ((state.extTab = t.dataset.etab), renderExtensions())));
   $('#btn-compact').onclick = compactNow;
+  $('#btn-undo').onclick = openCheckpoints;
+  $('#btn-bg').onclick = openBackground;
+  $('#btn-schedule').onclick = openSchedules;
+  $('#btn-tool-close').onclick = () => $('#tool-modal').classList.add('hidden');
+  setInterval(refreshBgCount, 5000);
 
   const input = $('#input');
   input.oninput = () => {

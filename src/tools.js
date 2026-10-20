@@ -3,6 +3,9 @@ const fsp = require('fs/promises');
 const path = require('path');
 const { spawn } = require('child_process');
 const computer = require('./computer');
+const background = require('./background');
+const memory = require('./memory');
+const safety = require('./safety');
 
 const IGNORED_DIRS = new Set(['node_modules', '.git', 'dist', 'build', 'out', '.next', '.venv', 'venv', '__pycache__', '.cache', 'target', '.idea', '.vs']);
 const MAX_READ_BYTES = 256 * 1024;
@@ -192,6 +195,15 @@ const FILE_TOOLS = [
     name: 'fetch_url',
     description: 'HTTP GET a URL and return the response body as text (HTML tags stripped).',
     parameters: { type: 'object', properties: { url: { type: 'string' } }, required: ['url'] }
+  },
+  {
+    name: 'web_search',
+    description: 'Search the web and return the top results (title, URL, snippet). Follow up with fetch_url to read a page.',
+    parameters: {
+      type: 'object',
+      properties: { query: { type: 'string' }, max_results: { type: 'integer', description: 'Default 8, max 20.' } },
+      required: ['query']
+    }
   }
 ];
 
@@ -226,13 +238,16 @@ const COMPUTER_TOOL = {
 
 function getToolSchemas(settings) {
   const tools = [...FILE_TOOLS];
+  if (settings.webSearch === false) tools.splice(tools.findIndex((t) => t.name === 'web_search'), 1);
+  tools.push(...background.SCHEMAS);
+  if (settings.memoryEnabled !== false) tools.push(memory.SCHEMA);
   if (settings.computerUse) tools.push(COMPUTER_TOOL);
   return tools.map((t) => ({ type: 'function', function: t }));
 }
 
 // ---------- Permission classification ----------
 
-const READ_ONLY = new Set(['list_directory', 'read_file', 'glob', 'grep', 'wait']);
+const READ_ONLY = new Set(['list_directory', 'read_file', 'glob', 'grep', 'wait', 'bg_output', 'bg_list', 'memory']);
 
 // Seconds of a command that does nothing but wait (Start-Sleep / sleep / timeout / ping -n N localhost),
 // optionally several joined with ";" or "&&". Returns null for anything else.
@@ -390,7 +405,7 @@ function commandOutsidePaths(workspace, args) {
 function needsApproval(name, args, settings) {
   const mode = settings.permissionMode;
   // Opt-in: shell commands reaching outside the workspace ask even in full-access mode.
-  if (mode === 'full' && name === 'run_command' && settings.confirmOutsideWorkspace && commandOutsidePaths(settings.workspace, args).length) return true;
+  if (mode === 'full' && (name === 'run_command' || name === 'bg_start') && settings.confirmOutsideWorkspace && commandOutsidePaths(settings.workspace, args).length) return true;
   if (mode === 'full') return false;
   if (READ_ONLY.has(name)) {
     // Reading outside the workspace still asks in "ask" mode.
@@ -629,22 +644,93 @@ async function fetchUrl(_ws, args, { signal } = {}) {
   return `HTTP ${res.status}\n\n${truncate(text.trim(), 20000)}`;
 }
 
+const decodeEntities = (s) =>
+  String(s || '')
+    .replace(/<[^>]+>/g, '')
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&#x27;|&#39;/g, "'")
+    .replace(/&nbsp;/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+// Web search: a configurable JSON endpoint (SearXNG-style, "{query}" placeholder) or DuckDuckGo HTML.
+async function webSearch(args, settings, { signal } = {}) {
+  const q = String(args.query || '').trim();
+  if (!q) throw new Error('query is required');
+  const max = Math.max(1, Math.min(20, Number(args.max_results) || 8));
+  let results = [];
+  const tpl = (settings.searchUrl || '').trim();
+  if (tpl) {
+    const url = tpl.includes('{query}') ? tpl.replace('{query}', encodeURIComponent(q)) : tpl + (tpl.includes('?') ? '&' : '?') + 'q=' + encodeURIComponent(q);
+    const res = await fetch(url, { signal, headers: { 'User-Agent': 'OmniRoute-Desktop/0.2', Accept: 'application/json' } });
+    if (!res.ok) throw new Error(`search HTTP ${res.status}`);
+    const j = await res.json();
+    const list = j.results || j.items || j.organic_results || (j.web && j.web.results) || [];
+    results = list.map((r) => ({ title: r.title || r.name || '', url: r.url || r.link || '', snippet: r.content || r.snippet || r.description || '' }));
+  } else {
+    const res = await fetch('https://html.duckduckgo.com/html/?q=' + encodeURIComponent(q), {
+      signal,
+      headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) OmniRoute-Desktop/0.2', 'Accept-Language': 'en-US,en;q=0.8,ko;q=0.6' }
+    });
+    if (!res.ok) throw new Error(`search HTTP ${res.status}`);
+    const html = await res.text();
+    const re = /<a[^>]+class="result__a"[^>]+href="([^"]+)"[^>]*>([\s\S]*?)<\/a>[\s\S]*?(?:<a[^>]+class="result__snippet"[^>]*>([\s\S]*?)<\/a>)?/g;
+    let m;
+    while ((m = re.exec(html)) && results.length < max * 2) {
+      let url = decodeEntities(m[1]);
+      const u = /[?&]uddg=([^&]+)/.exec(url);
+      if (u) url = decodeURIComponent(u[1]);
+      if (url.startsWith('//')) url = 'https:' + url;
+      if (/duckduckgo\.com\/y\.js/.test(url)) continue; // ads
+      results.push({ title: decodeEntities(m[2]), url, snippet: decodeEntities(m[3]) });
+    }
+  }
+  results = results.filter((r) => r.url).slice(0, max);
+  if (!results.length) return `No results for "${q}".`;
+  return results.map((r, i) => `${i + 1}. ${r.title}\n   ${r.url}${r.snippet ? '\n   ' + r.snippet.slice(0, 300) : ''}`).join('\n');
+}
+
 /**
  * Execute a tool. Returns { text, image? } where image is a data URL.
+ * ctx.checkpoint ({ convId, turn, label }) snapshots files before they are changed.
  */
 async function executeTool(name, args, settings, ctx = {}) {
   const ws = settings.workspace;
+  const snap = async (p) => {
+    if (ctx.checkpoint && settings.checkpoints !== false) {
+      try {
+        await safety.record(ctx.checkpoint, resolvePath(ws, p));
+      } catch {}
+    }
+  };
   switch (name) {
     case 'list_directory':
       return { text: await listDirectory(ws, args) };
     case 'read_file':
       return { text: await readFile(ws, args) };
     case 'write_file':
+      await snap(args.path);
       return { text: await writeFile(ws, args), changed: resolvePath(ws, args.path) };
     case 'edit_file':
+      await snap(args.path);
       return { text: await editFile(ws, args), changed: resolvePath(ws, args.path) };
     case 'delete_path':
+      await snap(args.path);
       return { text: await deletePath(ws, args), changed: resolvePath(ws, args.path) };
+    case 'web_search':
+      return { text: await webSearch(args, settings, ctx) };
+    case 'memory':
+      return { text: memory.tool(args, settings) };
+    case 'bg_start':
+    case 'bg_output':
+    case 'bg_stop':
+    case 'bg_list': {
+      const cwd = name === 'bg_start' ? (args.cwd ? resolvePath(ws, args.cwd) : ws || require('os').homedir()) : undefined;
+      return { text: truncate(await background.tool(name, { ...args, cwd }, { cwd, owner: ctx.owner, signal: ctx.signal })) };
+    }
     case 'glob':
       return { text: await globTool(ws, args) };
     case 'grep':

@@ -62,6 +62,12 @@ const server = http.createServer((req, res) => {
     } else if (last.role === 'user' && /^NOWSTEER/.test(u) && lastTool && /interrupted this tool call/.test(lastTool.content)) {
       send({ choices: [{ index: 0, delta: { content: 'IMMEDIATE-STEER-ACK' } }] });
       send({ choices: [{ index: 0, delta: {}, finish_reason: 'stop' }] });
+    } else if (/^WRITE undo-me/.test(u) && last.role === 'user') {
+      send({ choices: [{ index: 0, delta: { tool_calls: [{ index: 0, id: 'wu1', type: 'function', function: { name: 'write_file', arguments: '{"path":"undo-me.txt","content":"after"}' } }] } }] });
+      send({ choices: [{ index: 0, delta: {}, finish_reason: 'tool_calls' }] });
+    } else if (/^WRITE undo-me/.test(u) && last.role === 'tool') {
+      send({ choices: [{ index: 0, delta: { content: 'WRITE-DONE' } }] });
+      send({ choices: [{ index: 0, delta: {}, finish_reason: 'stop' }] });
     } else if (/^APPROVE/.test(u) && last.role === 'user') {
       await sleep(200);
       send({ choices: [{ index: 0, delta: { tool_calls: [{ index: 0, id: 'ap1', type: 'function', function: { name: 'write_file', arguments: '{"path":"ap.txt","content":"x"}' } }] } }] });

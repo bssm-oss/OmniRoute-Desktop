@@ -4,7 +4,7 @@ const custom = require('./customizations');
 const mcp = require('./mcp');
 const { getToolSchemas } = require('./tools');
 
-const READ_ONLY_TOOLS = ['list_directory', 'read_file', 'glob', 'grep', 'fetch_url', 'wait'];
+const READ_ONLY_TOOLS = ['list_directory', 'read_file', 'glob', 'grep', 'fetch_url', 'web_search', 'wait', 'bg_output', 'bg_list'];
 
 const SKILL_TOOL = {
   name: 'skill',
@@ -26,7 +26,8 @@ function taskTool(agentTypes) {
       properties: {
         agent_type: { type: 'string', enum: agentTypes.map((a) => a.name) },
         description: { type: 'string', description: 'Short 3-6 word label.' },
-        prompt: { type: 'string', description: 'Complete, self-contained task instructions.' }
+        prompt: { type: 'string', description: 'Complete, self-contained task instructions.' },
+        model: { type: 'string', description: 'Optional model id for this subagent (e.g. a cheaper/faster model for simple work, a stronger one for hard work). Defaults to the configured subagent model.' }
       },
       required: ['agent_type', 'prompt']
     }
@@ -95,7 +96,7 @@ const BUILTIN_SUBAGENTS = [
 
 // Map tool names used by VS Code / Claude Code agent files onto our tools.
 const TOOL_NAME_MAP = {
-  read: READ_ONLY_TOOLS.filter((t) => t !== 'fetch_url'),
+  read: READ_ONLY_TOOLS.filter((t) => t !== 'fetch_url' && t !== 'web_search'),
   view: ['read_file'],
   ls: ['list_directory'],
   codebase: ['glob', 'grep', 'read_file', 'list_directory'],
@@ -107,10 +108,10 @@ const TOOL_NAME_MAP = {
   multiedit: ['edit_file'],
   write: ['write_file'],
   create: ['write_file'],
-  bash: ['run_command'],
-  shell: ['run_command'],
-  execute: ['run_command'],
-  terminal: ['run_command'],
+  bash: ['run_command', 'bg_start', 'bg_output', 'bg_stop', 'bg_list'],
+  shell: ['run_command', 'bg_start', 'bg_output', 'bg_stop', 'bg_list'],
+  execute: ['run_command', 'bg_start', 'bg_output', 'bg_stop', 'bg_list'],
+  terminal: ['run_command', 'bg_start', 'bg_output', 'bg_stop', 'bg_list'],
   runcommands: ['run_command'],
   runinterminal: ['run_command'],
   runtasks: ['run_command'],
@@ -118,7 +119,10 @@ const TOOL_NAME_MAP = {
   fetch: ['fetch_url'],
   webfetch: ['fetch_url'],
   web: ['fetch_url'],
-  websearch: ['fetch_url'],
+  websearch: ['web_search', 'fetch_url'],
+  search_web: ['web_search'],
+  background: ['bg_start', 'bg_output', 'bg_stop', 'bg_list'],
+  memory: ['memory'],
   task: ['task'],
   agent: ['task'],
   runsubagent: ['task'],

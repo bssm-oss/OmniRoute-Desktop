@@ -8,6 +8,10 @@ const custom = require('./customizations');
 const mcp = require('./mcp');
 const activity = require('./activity');
 const { resolvePath, IGNORED_DIRS } = require('./tools');
+const safety = require('./safety');
+const background = require('./background');
+const memory = require('./memory');
+const scheduler = require('./scheduler');
 
 // Isolated profile for test builds / parallel instances: separate userData so settings,
 // conversations and Chromium locks never collide with an installed app that is running.
@@ -48,6 +52,11 @@ let win = null;
 let emergencyShortcut = '';
 // convId -> { controller, approvals: Map, pending: Map, alwaysAllowed, conv, deleted }
 const runs = new Map();
+// Set while the app quits so in-flight runs stay recorded in active-runs.json for auto-resume.
+let quitting = false;
+app.on('before-quit', () => {
+  quitting = true;
+});
 
 // Apply metadata changes both to disk and to the in-memory conversation of an active run,
 // so the run's periodic saves don't overwrite them.
@@ -190,6 +199,99 @@ app.whenReady().then(() => {
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
   });
+  if (!process.env.OMNI_SMOKE && !process.env.OMNI_E2E) {
+    win.webContents.once('did-finish-load', () => setTimeout(resumeInterruptedRuns, 1500));
+    startScheduler();
+  }
+});
+
+// Runs that were active when the app quit/crashed: resume autopilot runs automatically, notify about others.
+function resumeInterruptedRuns() {
+  const active = store.getActiveRuns();
+  const settings = store.getSettings();
+  for (const [convId, info] of Object.entries(active)) {
+    store.setActiveRun(convId, null);
+    const conv = store.getConversation(convId);
+    if (!conv || runs.has(convId)) continue;
+    const fresh = Date.now() - (info.at || 0) < 24 * 3600 * 1000;
+    if (settings.autoResume !== false && fresh && (info.mode || conv.mode) === 'autopilot') {
+      send('agent:event', { convId, type: 'notice', text: '♻ 앱 재시작 전 중단된 Autopilot 작업을 자동으로 재개합니다.' });
+      startRun(convId, {
+        autoMessage: '[System] The app was restarted while you were working on this task, so your last step may have been interrupted. Check the current state (files, todo list, background processes are gone) and continue autonomously.'
+      }).catch((e) => send('agent:event', { convId, type: 'error', message: e.message }));
+    } else {
+      send('agent:event', { convId, type: 'notice', text: '⚠ 앱이 종료되어 이 대화의 실행이 중단되었습니다. 메시지를 보내면 이어서 진행합니다.' });
+    }
+  }
+}
+
+function startScheduler() {
+  scheduler.start({
+    getSchedules: () => store.getSettings().schedules || [],
+    markRan: (id, time) => {
+      const s = store.getSettings();
+      store.setSettings({ schedules: (s.schedules || []).map((x) => (x.id === id ? { ...x, lastRun: time, enabled: x.kind === 'once' ? false : x.enabled } : x)) });
+    },
+    onDue: async (s) => {
+      let convId = s.newConversation === false ? s.convId : null;
+      if (!convId || !store.getConversation(convId)) {
+        const settings = store.getSettings();
+        const conv = store.createConversation(s.workspace || settings.workspace, s.model || settings.model, s.mode || 'autopilot');
+        conv.title = `⏰ ${s.name || s.prompt.slice(0, 40)}`;
+        conv.titleLocked = true;
+        store.saveConversation(conv);
+        convId = conv.id;
+        if (s.newConversation === false) {
+          const st = store.getSettings();
+          store.setSettings({ schedules: (st.schedules || []).map((x) => (x.id === s.id ? { ...x, convId } : x)) });
+        }
+      }
+      send('conv:updated', { id: convId });
+      send('schedule:fired', { id: s.id, convId, name: s.name });
+      activity.attention('OmniRoute — 예약 작업 시작', s.name || s.prompt.slice(0, 80));
+      const payload = { convId, text: s.prompt, mode: s.mode || 'autopilot', model: s.model || undefined };
+      if (runs.has(convId)) {
+        queueOf(convId).push({ ...payload, id: newMsgId() });
+        emitQueue(convId);
+      } else await startRun(convId, payload);
+    }
+  });
+}
+
+ipcMain.handle('schedule:list', () => (store.getSettings().schedules || []).map((s) => ({ ...s, next: scheduler.nextRun(s, Number(s.lastRun) || Number(s.createdAt) || Date.now()), label: scheduler.describe(s) })));
+ipcMain.handle('schedule:save', (_e, sched) => {
+  const s = store.getSettings();
+  const list = s.schedules || [];
+  const item = { enabled: true, kind: 'interval', mode: 'autopilot', newConversation: true, ...sched };
+  if (!item.id) {
+    item.id = 's' + Date.now().toString(36);
+    item.createdAt = Date.now();
+  }
+  if (!String(item.prompt || '').trim()) throw new Error('프롬프트를 입력하세요.');
+  if (item.kind === 'daily' && !scheduler.parseHM(item.time)) throw new Error('시간 형식은 HH:MM 입니다.');
+  if (item.kind === 'interval' && !(Number(item.everyMinutes) >= 1)) throw new Error('간격(분)은 1 이상이어야 합니다.');
+  const i = list.findIndex((x) => x.id === item.id);
+  if (i >= 0) list[i] = { ...list[i], ...item };
+  else list.push(item);
+  store.setSettings({ schedules: list });
+  return item;
+});
+ipcMain.handle('schedule:delete', (_e, id) => {
+  const s = store.getSettings();
+  store.setSettings({ schedules: (s.schedules || []).filter((x) => x.id !== id) });
+  return true;
+});
+ipcMain.handle('schedule:runNow', async (_e, id) => {
+  const s = (store.getSettings().schedules || []).find((x) => x.id === id);
+  if (!s) throw new Error('Schedule not found');
+  const settings = store.getSettings();
+  const conv = store.createConversation(s.workspace || settings.workspace, s.model || settings.model, s.mode || 'autopilot');
+  conv.title = `⏰ ${s.name || s.prompt.slice(0, 40)}`;
+  conv.titleLocked = true;
+  store.saveConversation(conv);
+  send('conv:updated', { id: conv.id });
+  startRun(conv.id, { convId: conv.id, text: s.prompt, mode: s.mode || 'autopilot', model: s.model || undefined }).catch((e) => send('agent:event', { convId: conv.id, type: 'error', message: e.message }));
+  return conv.id;
 });
 
 app.on('window-all-closed', () => {
@@ -200,6 +302,8 @@ app.on('window-all-closed', () => {
 
 app.on('will-quit', () => {
   globalShortcut.unregisterAll();
+  scheduler.stop();
+  background.shutdown();
   activity.shutdown();
   computer.shutdown();
   mcp.shutdown();
@@ -370,8 +474,44 @@ ipcMain.handle('conv:delete', (_e, id) => {
   }
   queues.delete(id);
   store.deleteConversation(id);
+  safety.clear(id);
+  background.stopOwner(id);
+  store.setActiveRun(id, null);
   return true;
 });
+
+// ---------------- Checkpoints (undo agent file changes) ----------------
+
+ipcMain.handle('checkpoint:list', (_e, convId) => safety.list(convId));
+ipcMain.handle('checkpoint:restore', async (_e, { convId, turnId }) => {
+  if (runs.has(convId)) throw new Error('에이전트 실행 중에는 되돌릴 수 없습니다. 먼저 중지하세요.');
+  const r = await safety.restore(convId, turnId);
+  send('agent:event', { convId, type: 'files_changed', path: '' });
+  return r;
+});
+
+// ---------------- Background processes ----------------
+
+ipcMain.handle('bg:list', () => background.list().map((p) => ({ id: p.id, name: p.name, command: p.command, owner: p.owner, running: p.exitCode === null, exitCode: p.exitCode, startedAt: p.startedAt })));
+ipcMain.handle('bg:stop', (_e, id) => {
+  try {
+    background.stop(id);
+  } catch {}
+  return true;
+});
+ipcMain.handle('bg:output', (_e, id) => {
+  try {
+    return background.output(id, { all: true, tail: 30000, peek: true }).text;
+  } catch (e) {
+    return e.message;
+  }
+});
+
+// ---------------- Memory ----------------
+
+ipcMain.handle('memory:list', () => memory.all(store.getSettings()));
+ipcMain.handle('memory:remove', (_e, { scope, id }) => memory.tool({ action: 'remove', scope, id }, store.getSettings()));
+ipcMain.handle('memory:add', (_e, { scope, text }) => memory.tool({ action: 'add', scope, text }, store.getSettings()));
 ipcMain.handle('conv:rename', (_e, id, title) => updateConvMeta(id, { title, titleLocked: true }));
 ipcMain.handle('conv:setModel', (_e, id, model) => updateConvMeta(id, { model }));
 // Truncate conversation at a message index (for edit/retry).
@@ -541,16 +681,26 @@ ipcMain.handle('agent:queueToSteer', (_e, { convId, id }) => {
   return true;
 });
 
-async function startRun(convId, { text, attachments, model, mode, agentName }) {
+// Errors worth retrying the whole run for (transient API/network trouble), not config/user errors.
+function retriableRunError(e) {
+  const m = String((e && e.message) || e);
+  if (/No model selected|URL is not set|훅이 요청을 차단|Conversation not found/i.test(m)) return false;
+  return /HTTP (?:408|409|425|429|5\d\d)|fetch failed|network|ECONN|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|socket|terminated|stream|premature|timeout/i.test(m);
+}
+
+async function startRun(convId, { text, attachments, model, mode, agentName, autoMessage }) {
   if (runs.has(convId)) throw new Error('Agent is already running in this conversation.');
   const conv = store.getConversation(convId);
   if (!conv) throw new Error('Conversation not found');
   const settings = store.getSettings();
+  if (conv.workspace && conv.workspace !== settings.workspace && autoMessage) settings.workspace = conv.workspace;
+  if (autoMessage) conv.messages.push({ role: 'user', _auto: true, content: autoMessage });
   if (model) conv.model = model;
   if (!conv.model) conv.model = settings.model;
   if (mode) conv.mode = mode;
   if (agentName !== undefined) conv.agent = agentName;
   conv.workspace = settings.workspace;
+  text = text || '';
   const titleText = text;
   const slash = expandSlash(text, settings, conv);
   text = slash.text;
@@ -599,8 +749,52 @@ async function startRun(convId, { text, attachments, model, mode, agentName }) {
 
   emit('run_start', { mode: conv.mode, agent: conv.agent, userText: titleText, userAttachments: (attachments || []).length });
   emitQueue(convId);
+  store.setActiveRun(convId, { mode: conv.mode, model: conv.model, agent: conv.agent, workspace: settings.workspace });
+  const maxRetries = Math.max(0, Math.min(10, Number(settings.runRetries) || 0));
+  let attempt = 0;
   try {
-    await agent.runAgent(conv, settings, controller.signal, {
+    for (;;) {
+      try {
+        await runOnce();
+        break;
+      } catch (err) {
+        if (controller.signal.aborted || run.deleted || attempt >= maxRetries || !retriableRunError(err)) throw err;
+        attempt++;
+        const delay = Math.min(120000, 10000 * 2 ** (attempt - 1));
+        emit('notice', { text: `⚠ 실행 오류: ${String(err.message).slice(0, 200)} — ${Math.round(delay / 1000)}초 후 자동 재시도 (${attempt}/${maxRetries})` });
+        await new Promise((r) => {
+          const t = setTimeout(r, delay);
+          controller.signal.addEventListener('abort', () => (clearTimeout(t), r()), { once: true });
+        });
+        if (controller.signal.aborted) throw err;
+        const last = conv.messages[conv.messages.length - 1];
+        if (last && last.role === 'assistant' && !(last.tool_calls && last.tool_calls.length))
+          conv.messages.push({ role: 'user', _auto: true, content: '[System] The previous request failed with a transient error and was retried. Continue the task where you left off.' });
+      }
+    }
+  } catch (err) {
+    if (!controller.signal.aborted) emit('error', { message: err.message || String(err) });
+  } finally {
+    if (!quitting) store.setActiveRun(convId, null);
+    // Steers that never reached a tool-call boundary become the next queued messages.
+    const leftover = run.steers.splice(0);
+    runs.delete(convId);
+    refreshActivity();
+    const aborted = controller.signal.aborted;
+    if (!aborted && !run.deleted) activity.attention('OmniRoute — 작업 완료', `${conv.title || '대화'}: 응답이 완료되었습니다.`);
+    emit('run_end', { aborted });
+    if (run.deleted) queues.delete(convId);
+    else {
+      if (leftover.length) queueOf(convId).unshift(...leftover.map((s) => ({ id: s.id, text: s.display, attachments: s.attachments || [] })));
+      // On user stop, keep the queue but don't auto-run it; otherwise continue with the next message.
+      if (aborted) emitQueue(convId);
+      else setTimeout(() => drainQueue(convId), 50);
+    }
+  }
+  return true;
+
+  function runOnce() {
+    return agent.runAgent(conv, settings, controller.signal, {
       emit,
       alwaysAllowed: run.alwaysAllowed,
       registerToolCall: (id, info, interrupt) => {
@@ -641,25 +835,7 @@ async function startRun(convId, { text, attachments, model, mode, agentName }) {
         }
       }
     });
-  } catch (err) {
-    if (!controller.signal.aborted) emit('error', { message: err.message || String(err) });
-  } finally {
-    // Steers that never reached a tool-call boundary become the next queued messages.
-    const leftover = run.steers.splice(0);
-    runs.delete(convId);
-    refreshActivity();
-    const aborted = controller.signal.aborted;
-    if (!aborted && !run.deleted) activity.attention('OmniRoute — 작업 완료', `${conv.title || '대화'}: 응답이 완료되었습니다.`);
-    emit('run_end', { aborted });
-    if (run.deleted) queues.delete(convId);
-    else {
-      if (leftover.length) queueOf(convId).unshift(...leftover.map((s) => ({ id: s.id, text: s.display, attachments: s.attachments || [] })));
-      // On user stop, keep the queue but don't auto-run it; otherwise continue with the next message.
-      if (aborted) emitQueue(convId);
-      else setTimeout(() => drainQueue(convId), 50);
-    }
   }
-  return true;
 }
 
 ipcMain.handle('agent:queueRunNext', (_e, convId) => {

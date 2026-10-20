@@ -31,7 +31,7 @@ npm run dist:win   # Windows 포터블 exe + 압축해제 폴더 빌드 (dist/)
 
 # 격리 테스트 (실행 중인 app/ 과 userData·single-instance 충돌 없음)
 npm run build:test                      # test-build/build-<시각>/OmniRoute Desktop Test.exe (경로는 test-build/LATEST.txt)
-npm run test:e2e                        # UI E2E 41개 (격리 프로필 + mock 서버, 개발 소스)
+npm run test:e2e                        # UI E2E 50개 (격리 프로필 + mock 서버, 개발 소스)
 $env:E2E_EXE='latest'; npm run test:e2e # 같은 UI E2E를 최신 패키징 테스트 빌드로 실행
 npm run test:mm                         # 멀티 모니터 Computer Use 검증
 # 임의 프로필로 개발 실행: $env:OMNI_PROFILE='dev2'; npm start   (userData: %APPDATA%\omniroute-desktop-dev2)
@@ -65,6 +65,20 @@ npm run test:mm                         # 멀티 모니터 Computer Use 검증
 - 에이전트가 작업 중에도 입력창은 막히지 않습니다. **Enter = 대기열(queue)**: 현재 턴이 끝나면 순서대로 자동 실행. **Ctrl+Enter 또는 🧭 Steer 버튼 = steer**: 진행 중인 실행의 다음 도구 호출 경계에서 사용자 메시지로 주입해 방향 전환.
 - 대기 중 메시지는 입력창 위 패널에 표시되며 수정(✎)·순서 변경(↑↓)·삭제(✕)·steer로 전환(🧭) 가능. 중지하면 대기열은 보존되고 "▶ 지금 실행"으로 재개.
 
+### 자율 실행 · 안전장치 (설정 › 자율 실행 · 안전)
+
+- **위험 명령 차단**: `rm -rf /`·`~`, `git push --force`, `git reset --hard`, `git clean -fd`, 드라이브 루트 `Remove-Item -Recurse`/`rd /s`, `format`, `mkfs`, `dd of=/dev/…`, `shutdown`, `reg delete HKLM`, `npm publish`, `curl | sh` 등은 Autopilot·전체 권한에서도 실행되지 않습니다. 추가 패턴은 `extraBlockedCommands`(정규식)로 지정.
+- **파일 체크포인트 (↶)**: 에이전트가 `write_file`/`edit_file`/`delete_path`로 바꾼 파일을 실행 단위로 `~/.omniroute/checkpoints`에 백업. 상단 ↶ 버튼으로 특정 실행(및 그 이후)의 변경을 되돌립니다. 새로 만든 파일은 삭제, 삭제된 파일은 복원됩니다. `run_command`로 바뀐 파일은 대상이 아닙니다.
+- **백그라운드 프로세스 (⚙)**: `bg_start`/`bg_output`/`bg_stop`/`bg_list`. 개발 서버·watcher를 막힘 없이 띄우고 출력 대기(`ready_pattern`, `filter`, `wait_seconds`)를 할 수 있습니다. 대화 삭제·앱 종료 시 정리됩니다.
+- **장기 메모리**: `memory` 도구(user = `~/.omniroute/memory.json`, project = `<작업폴더>/.omniroute/memory.json`)로 저장한 내용이 이후 모든 대화의 시스템 프롬프트에 들어갑니다. ⏰ 패널에서 보기·추가·삭제할 수 있습니다.
+- **웹 검색**: `web_search` 도구. 기본은 DuckDuckGo HTML이고, `searchUrl`에 SearXNG 같은 JSON 엔드포인트(`{query}`)를 지정할 수 있습니다.
+- **대체 모델**: 기본 모델 요청이 실패하면(HTTP 4xx/5xx·네트워크) `fallbackModels`를 순서대로 시도하고, 성공한 모델로 계속 진행합니다. 서브에이전트는 `task(model=…)`로 호출별 모델을 지정할 수 있습니다.
+- **완료 검증**: Autopilot의 `task_complete`는 열린 todo가 남아 있거나 `verifyCommand`(예: `npm test`)가 실패하면 거부되고, 에이전트는 작업을 계속합니다.
+- **반복·정체 감지**: 같은 호출이 같은 결과로 3번 반복되거나 연속 오류가 `maxErrorStreak`에 이르면 접근 방식을 바꾸라는 지시를 주입합니다.
+- **예산 · 스텝 연장**: 실행당 토큰·시간 예산(`maxRunTokens`, `maxRunMinutes`)이 있습니다. Autopilot이 최대 스텝에 닿았는데 남은 todo가 있으면 압축 후 최대 2회 연장합니다. 중단될 때는 원인·진행·남은 todo·마지막 오류를 담은 진단 보고를 표시합니다.
+- **자동 재시도 · 재개**: 일시적 API/네트워크 오류로 실행이 실패하면 `runRetries`회까지 백오프 후 이어서 진행합니다. 앱이 종료·크래시되어 Autopilot 실행이 끊기면 재시작 시 자동으로 재개합니다(`autoResume`).
+- **예약 작업 (⏰)**: 간격(분)·매일 시각(요일 선택)·1회 예약으로 새 대화에서 프롬프트를 자동 실행합니다(기본 Autopilot, 앱 실행 중일 때).
+
 ### 기타
 
 - 대화 검색(제목·내용), 인라인 이름 변경(✎/더블클릭), Markdown 내보내기(⤓), 라이트/다크 테마(◐), 모델 직접 입력(모델 목록의 "✎ 직접 입력…")
@@ -96,6 +110,10 @@ src/computer.js        Computer Use (스크린샷 + 입력)
 src/customizations.js  스킬/에이전트/프롬프트/지침/플러그인/MCP/훅 탐색
 src/mcp.js             MCP 클라이언트 (stdio, streamable HTTP)
 src/hooks.js           라이프사이클 훅 실행기
-src/store.js           설정(암호화 키), 대화 저장
+src/store.js           설정(암호화 키), 대화 저장, 실행 중 상태(자동 재개)
+src/safety.js          위험 명령 차단, 파일 체크포인트/되돌리기
+src/background.js      백그라운드 프로세스 (bg_start/bg_output/bg_stop/bg_list)
+src/memory.js          장기 메모리 (user/project)
+src/scheduler.js       예약 작업 (간격/매일/1회)
 renderer/              UI (vanilla JS, marked + DOMPurify)
 ```

@@ -56,6 +56,19 @@ contextBridge.exposeInMainWorld('api', {
   emergencyShortcut: () => invoke('app:emergencyShortcut'),
   appInfo: () => invoke('app:info'),
 
+  checkpoints: (convId) => invoke('checkpoint:list', convId),
+  restoreCheckpoint: (payload) => invoke('checkpoint:restore', payload),
+  bgList: () => invoke('bg:list'),
+  bgStop: (id) => invoke('bg:stop', id),
+  bgOutput: (id) => invoke('bg:output', id),
+  memoryList: () => invoke('memory:list'),
+  memoryAdd: (payload) => invoke('memory:add', payload),
+  memoryRemove: (payload) => invoke('memory:remove', payload),
+  scheduleList: () => invoke('schedule:list'),
+  scheduleSave: (s) => invoke('schedule:save', s),
+  scheduleDelete: (id) => invoke('schedule:delete', id),
+  scheduleRunNow: (id) => invoke('schedule:runNow', id),
+
   onAgentEvent: (cb) => ipcRenderer.on('agent:event', (_e, ev) => cb(ev)),
   onConvUpdated: (cb) => ipcRenderer.on('conv:updated', (_e, ev) => cb(ev))
 });

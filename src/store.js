@@ -32,7 +32,26 @@ const DEFAULT_SETTINGS = {
   cuCountdownSeconds: 3,
   cuBadge: true,
   taskbarIndicator: true,
-  attentionNotify: true
+  attentionNotify: true,
+  // Autonomy & safety
+  blockDangerousCommands: true,
+  extraBlockedCommands: [],
+  checkpoints: true,
+  fallbackModels: [],
+  verifyCommand: '',
+  verifyTimeout: 600,
+  requireTodosDone: true,
+  maxRunTokens: 0,
+  maxRunMinutes: 0,
+  continueAfterMaxSteps: true,
+  maxStepExtensions: 2,
+  maxErrorStreak: 8,
+  runRetries: 2,
+  autoResume: true,
+  memoryEnabled: true,
+  webSearch: true,
+  searchUrl: '',
+  schedules: []
 };
 
 function dataDir() {
@@ -207,6 +226,25 @@ function deleteConversation(id) {
   } catch {}
 }
 
+// Active runs persisted so they can be resumed after a crash / restart.
+function runsFile() {
+  return path.join(dataDir(), 'active-runs.json');
+}
+
+function getActiveRuns() {
+  const r = readJson(runsFile(), {});
+  return r && typeof r === 'object' && !Array.isArray(r) ? r : {};
+}
+
+function setActiveRun(convId, info) {
+  const r = getActiveRuns();
+  if (info) r[convId] = { ...info, at: Date.now() };
+  else delete r[convId];
+  try {
+    writeJson(runsFile(), r);
+  } catch {}
+}
+
 module.exports = {
   getSettings,
   setSettings,
@@ -217,5 +255,7 @@ module.exports = {
   deleteConversation,
   searchConversations,
   conversationToMarkdown,
-  pruneImages
+  pruneImages,
+  getActiveRuns,
+  setActiveRun
 };

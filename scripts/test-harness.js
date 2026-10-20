@@ -53,6 +53,7 @@ fs.writeFileSync(path.join(PLUG_SRC, '.mcp.json'), JSON.stringify({ mcpServers: 
 // ---------------- Mock server ----------------
 let script = []; // array of functions(reqBody) => response spec
 const requests = [];
+const failModels = new Set(); // models the mock rejects with HTTP 404
 function sse(res, msg) {
   res.writeHead(200, { 'Content-Type': 'text/event-stream' });
   const send = (o) => res.write(`data: ${JSON.stringify(o)}\n\n`);
@@ -75,6 +76,10 @@ const server = http.createServer((req, res) => {
     const j = JSON.parse(body);
     requests.push(j);
     assert.strictEqual(req.headers.authorization, 'Bearer test-key');
+    if (failModels.has(j.model)) {
+      res.writeHead(404, { 'Content-Type': 'application/json' });
+      return res.end(JSON.stringify({ error: { message: `model ${j.model} not found` } }));
+    }
     if (!j.stream) {
       res.writeHead(200, { 'Content-Type': 'application/json' });
       return res.end(JSON.stringify({ choices: [{ message: { content: 'SUMMARY OK' } }] }));
@@ -651,6 +656,255 @@ process.stdout.write(JSON.stringify({jsonrpc:'2.0',id:m.id,result})+'\\n')});`);
     assert(agent.buildSystemPrompt(settings, { mode: 'agent', skills: [], depth: 0 }).includes('capped at 60 seconds'));
   }
   ok('wait tool and sleep commands are capped at 60s; cap shown in result, card and system prompt');
+
+  // ---------------- Autonomy features ----------------
+  const safety = require('../src/safety');
+  const background = require('../src/background');
+  const memoryMod = require('../src/memory');
+  const scheduler = require('../src/scheduler');
+
+  // 23. dangerous commands are hard-blocked even in full-access autopilot
+  {
+    for (const c of ['rm -rf /', 'rm -rf ~', 'sudo rm -rf --no-preserve-root /', 'git push --force origin main', 'git push -f', 'git reset --hard HEAD~3', 'Remove-Item -Recurse -Force C:\\', 'format C:', 'rd /s /q C:\\', 'mkfs.ext4 /dev/sda1'])
+      assert(safety.dangerousCommand(c), 'should block: ' + c);
+    for (const c of ['rm -rf node_modules', 'git push origin main', 'git status', 'npm test', 'Remove-Item -Recurse dist', 'git reset --soft HEAD~1', 'echo format'])
+      assert(!safety.dangerousCommand(c), 'should allow: ' + c);
+    assert(safety.dangerousCommand('deploy-prod.sh', { extraBlockedCommands: ['deploy-prod'] }), 'extra pattern');
+    assert(!safety.dangerousCall('run_command', { command: 'rm -rf /' }, { blockDangerousCommands: false }), 'can be disabled');
+    assert(safety.dangerousCall('delete_path', { path: '.' }, { workspace: os.homedir() }), 'home folder delete');
+    assert(safety.dangerousCall('run_command', { command: `Remove-Item -Recurse -Force "${os.homedir()}"` }, {}), 'literal home path');
+    assert(safety.dangerousCall('run_command', { command: `rm -rf ${WS}/` }, { workspace: WS }), 'whole workspace');
+    assert(!safety.dangerousCall('run_command', { command: `rm -rf ${path.join(WS, 'dist')}` }, { workspace: WS }), 'subfolder ok');
+    script = [() => ({ tool_calls: [{ name: 'run_command', args: { command: 'git push --force origin main' } }] }), () => ({ tool_calls: [{ name: 'task_complete', args: { summary: 'done' } }] })];
+    const c23 = { id: 't23', messages: [{ role: 'user', content: 'push' }], mode: 'autopilot' };
+    const r23 = await agent.runAgent(c23, { ...settings, permissionMode: 'full', requireTodosDone: false }, new AbortController().signal, makeHooks([]));
+    const t23 = c23.messages.find((m) => m.role === 'tool');
+    assert(/blocked|차단/i.test(t23.content), t23.content);
+    assert(r23.completed);
+  }
+  ok('dangerous commands (rm -rf /, force push, reset --hard, format…) are hard-blocked in every mode');
+
+  // 24. checkpoints: agent file changes can be undone per run
+  {
+    fs.writeFileSync(path.join(WS, 'cp.txt'), 'original\n');
+    script = [
+      () => ({ tool_calls: [{ name: 'edit_file', args: { path: 'cp.txt', old_string: 'original', new_string: 'changed' } }, { name: 'write_file', args: { path: 'cp-new/created.txt', content: 'new' } }] }),
+      () => ({ content: 'edited' })
+    ];
+    const c24 = { id: 'cp-conv', messages: [{ role: 'user', content: 'edit cp' }], mode: 'agent' };
+    await agent.runAgent(c24, { ...settings, permissionMode: 'full' }, new AbortController().signal, makeHooks([]));
+    assert.strictEqual(fs.readFileSync(path.join(WS, 'cp.txt'), 'utf8'), 'changed\n');
+    // second run deletes the file
+    script = [() => ({ tool_calls: [{ name: 'delete_path', args: { path: 'cp.txt' } }] }), () => ({ content: 'deleted' })];
+    c24.messages.push({ role: 'user', content: 'delete cp' });
+    await agent.runAgent(c24, { ...settings, permissionMode: 'full' }, new AbortController().signal, makeHooks([]));
+    assert(!fs.existsSync(path.join(WS, 'cp.txt')));
+    const cps = safety.list('cp-conv');
+    assert.strictEqual(cps.length, 2, JSON.stringify(cps));
+    assert.strictEqual(cps[0].label, 'delete cp');
+    // undo only the last run -> file is back in "changed" state
+    let r = await safety.restore('cp-conv', cps[0].id);
+    assert.strictEqual(fs.readFileSync(path.join(WS, 'cp.txt'), 'utf8'), 'changed\n');
+    assert(r.restored.length === 1);
+    // undo the first run too -> original, created file removed
+    r = await safety.restore('cp-conv', safety.list('cp-conv')[0].id);
+    assert.strictEqual(fs.readFileSync(path.join(WS, 'cp.txt'), 'utf8'), 'original\n');
+    assert(!fs.existsSync(path.join(WS, 'cp-new/created.txt')));
+    assert.strictEqual(safety.list('cp-conv').length, 0);
+    safety.clear('cp-conv');
+  }
+  ok('checkpoints: per-run file snapshots, undo last run or back to an earlier run (incl. created/deleted files)');
+
+  // 25. background processes: start, read incremental output, list, stop
+  {
+    const cmd = process.platform === 'win32' ? `& '${process.execPath}' -e "let i=0;setInterval(()=>console.log('tick '+(i++)),150)"` : `'${process.execPath}' -e "let i=0;setInterval(()=>console.log('tick '+(i++)),150)"`;
+    script = [
+      () => ({ tool_calls: [{ name: 'bg_start', args: { command: cmd, name: 'ticker', ready_pattern: 'tick 1' } }] }),
+      (req) => {
+        const id = /Started background process (bg\d+)/.exec(lastTool(req).content)[1];
+        return { tool_calls: [{ name: 'bg_output', args: { id, wait_seconds: 2, filter: 'tick [5-9]' } }] };
+      },
+      (req) => {
+        assert(/tick [5-9]/.test(lastTool(req).content), lastTool(req).content);
+        return { tool_calls: [{ name: 'bg_list', args: {} }] };
+      },
+      (req) => {
+        assert(/ticker.*running/.test(lastTool(req).content), lastTool(req).content);
+        const id = /(bg\d+)/.exec(lastTool(req).content)[1];
+        return { tool_calls: [{ name: 'bg_stop', args: { id } }] };
+      },
+      (req) => {
+        assert(/Stopped/.test(lastTool(req).content), lastTool(req).content);
+        return { content: 'bg done' };
+      }
+    ];
+    const t25 = Date.now();
+    const c25 = { id: 'bgconv', messages: [{ role: 'user', content: 'start server' }], mode: 'agent' };
+    const r25 = await agent.runAgent(c25, { ...settings, permissionMode: 'full' }, new AbortController().signal, makeHooks([]));
+    assert.strictEqual(r25.lastText, 'bg done');
+    assert(Date.now() - t25 < 15000, 'bg_start must not block');
+    await new Promise((r) => setTimeout(r, 500));
+    assert(background.list('bgconv').every((p) => p.exitCode !== null), 'stopped');
+    background.shutdown();
+  }
+  ok('background processes: bg_start returns immediately, bg_output (incremental/filter/wait), bg_list, bg_stop');
+
+  // 26. memory tool persists across conversations and is injected into the system prompt
+  {
+    script = [() => ({ tool_calls: [{ name: 'memory', args: { action: 'add', text: 'Project uses pnpm, not npm', scope: 'project' } }] }), () => ({ content: 'saved' })];
+    await agent.runAgent({ id: 'm1', messages: [{ role: 'user', content: 'remember' }], mode: 'agent' }, settings, new AbortController().signal, makeHooks([]));
+    assert(fs.existsSync(path.join(WS, '.omniroute/memory.json')));
+    let sys;
+    script = [(req) => ((sys = req.messages[0].content), { content: 'ok' })];
+    await agent.runAgent({ id: 'm2', messages: [{ role: 'user', content: 'hi' }], mode: 'ask' }, settings, new AbortController().signal, makeHooks([]));
+    assert(/Project uses pnpm, not npm/.test(sys), 'memory in system prompt');
+    assert(memoryMod.all(settings).length === 1);
+    assert(!/pnpm/.test(agent.buildSystemPrompt({ ...settings, memoryEnabled: false }, { mode: 'agent', skills: [], depth: 0 })));
+    memoryMod.tool({ action: 'remove', scope: 'project', id: '1' }, settings);
+    assert.strictEqual(memoryMod.all(settings).length, 0);
+  }
+  ok('memory tool: project/user scopes persist and are injected into the system prompt');
+
+  // 27. web_search via a configurable JSON endpoint; can be disabled
+  {
+    const sSrv = http.createServer((req, res) => {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ results: [{ title: 'OmniRoute docs', url: 'https://example.com/omni', content: 'Q=' + new URL(req.url, 'http://x').searchParams.get('q') }] }));
+    });
+    await new Promise((r) => sSrv.listen(0, '127.0.0.1', r));
+    const tools = require('../src/tools');
+    const out = await tools.executeTool('web_search', { query: 'omni route' }, { ...settings, searchUrl: `http://127.0.0.1:${sSrv.address().port}/search?format=json&q={query}` }, {});
+    sSrv.close();
+    assert(/OmniRoute docs/.test(out.text) && /https:\/\/example.com\/omni/.test(out.text) && /Q=omni route/.test(out.text), out.text);
+    let names;
+    script = [(req) => ((names = toolsOf(req)), { content: 'x' })];
+    await agent.runAgent({ id: 'ws', messages: [{ role: 'user', content: 'q' }], mode: 'agent' }, { ...settings, webSearch: false }, new AbortController().signal, makeHooks([]));
+    assert(!names.includes('web_search') && names.includes('fetch_url'));
+  }
+  ok('web_search: JSON endpoint results formatted; tool removed when disabled');
+
+  // 28. fallback models: a failing model switches to the next one and stays there
+  {
+    failModels.add('broken-model');
+    const seen = [];
+    script = [(req) => (seen.push(req.model), { content: 'from fallback' })];
+    const log28 = [];
+    const c28 = { id: 'fb', messages: [{ role: 'user', content: 'hi' }], mode: 'agent', model: 'broken-model' };
+    const r28 = await agent.runAgent(c28, { ...settings, model: 'broken-model', fallbackModels: 'broken-model, mock-b' }, new AbortController().signal, makeHooks(log28));
+    failModels.clear();
+    assert.strictEqual(r28.lastText, 'from fallback');
+    assert.deepStrictEqual(seen, ['mock-b']);
+    assert(log28.some((e) => e.type === 'model_switched' && e.model === 'mock-b'));
+  }
+  ok('fallback models: HTTP error on the primary model switches to the next configured model');
+
+  // 29. task_complete is rejected while todos are open or the verify command fails
+  {
+    const failCmd = `node -e "process.exit(fs.existsSync('verified.flag')?0:1)"`.replace('fs.', "require('fs').");
+    script = [
+      () => ({ tool_calls: [{ name: 'todo_write', args: { todos: [{ title: 'a', status: 'in_progress' }] } }] }),
+      () => ({ tool_calls: [{ name: 'task_complete', args: { summary: 'too early' } }] }),
+      (req) => {
+        assert(/todo\(s\) are not done/.test(lastTool(req).content), lastTool(req).content);
+        return { tool_calls: [{ name: 'todo_write', args: { todos: [{ title: 'a', status: 'done' }] } }] };
+      },
+      () => ({ tool_calls: [{ name: 'task_complete', args: { summary: 'still failing' } }] }),
+      (req) => {
+        assert(/verification command .* failed/.test(lastTool(req).content), lastTool(req).content);
+        fs.writeFileSync(path.join(WS, 'verified.flag'), '1');
+        return { tool_calls: [{ name: 'task_complete', args: { summary: 'verified!' } }] };
+      }
+    ];
+    const c29 = { id: 'vf', messages: [{ role: 'user', content: 'do it' }], mode: 'autopilot' };
+    const r29 = await agent.runAgent(c29, { ...settings, permissionMode: 'full', verifyCommand: failCmd }, new AbortController().signal, makeHooks([]));
+    assert(r29.completed && r29.summary === 'verified!', JSON.stringify(r29));
+    fs.unlinkSync(path.join(WS, 'verified.flag'));
+  }
+  ok('autopilot completion check: open todos and a failing verifyCommand reject task_complete');
+
+  // 30. loop detection + token budget stop with a diagnostic report
+  {
+    let warned = false;
+    script = [
+      () => ({ tool_calls: [{ name: 'read_file', args: { path: 'hello.txt' } }] }),
+      () => ({ tool_calls: [{ name: 'read_file', args: { path: 'hello.txt' } }] }),
+      () => ({ tool_calls: [{ name: 'read_file', args: { path: 'hello.txt' } }] }),
+      (req) => {
+        warned = req.messages.some((m) => m.role === 'user' && /Loop detector/.test(m.content));
+        return { content: 'ok' };
+      }
+    ];
+    await agent.runAgent({ id: 'lp', messages: [{ role: 'user', content: 'x' }], mode: 'agent' }, settings, new AbortController().signal, makeHooks([]));
+    assert(warned, 'loop detector warning sent to the model');
+
+    script = Array.from({ length: 10 }, (_, i) => () => ({ tool_calls: [{ name: 'read_file', args: { path: 'hello.txt', offset: i + 1 } }] }));
+    const log30 = [];
+    const r30 = await agent.runAgent({ id: 'bud', messages: [{ role: 'user', content: 'x' }], mode: 'autopilot' }, { ...settings, maxRunTokens: 250 }, new AbortController().signal, makeHooks(log30));
+    assert(!r30.completed && /토큰 예산/.test(r30.stopReason || ''), JSON.stringify(r30));
+    assert(log30.some((e) => e.type === 'run_diagnosis' && /자동 진행 중단/.test(e.text)));
+    script = [];
+  }
+  ok('loop detector warns on repeated identical calls; token budget stops autopilot with a diagnosis');
+
+  // 31. subagent model override via task(model)
+  {
+    const models = [];
+    script = [
+      () => ({ tool_calls: [{ name: 'task', args: { agent_type: 'explore', prompt: 'look', model: 'mock-b' } }] }),
+      (req) => (models.push(req.model), { content: 'sub result' }),
+      (req) => (models.push(req.model), { content: 'main done' })
+    ];
+    await agent.runAgent({ id: 'sm', messages: [{ role: 'user', content: 'x' }], mode: 'agent' }, settings, new AbortController().signal, makeHooks([]));
+    assert.deepStrictEqual(models, ['mock-b', 'mock-a']);
+  }
+  ok('task tool: per-call subagent model override');
+
+  // 32. scheduler: interval/daily/once due computation
+  {
+    const now = new Date(2026, 9, 19, 10, 0, 0).getTime();
+    const iv = { id: 'a', prompt: 'p', kind: 'interval', everyMinutes: 30, createdAt: now - 31 * 60000 };
+    assert.strictEqual(scheduler.due([iv], now).length, 1);
+    assert.strictEqual(scheduler.due([{ ...iv, lastRun: now - 10 * 60000 }], now).length, 0);
+    const daily = { id: 'b', prompt: 'p', kind: 'daily', time: '09:30', createdAt: now - 86400000, lastRun: now - 86400000 + 30 * 60000 };
+    assert.strictEqual(scheduler.due([daily], now).length, 1, 'daily 09:30 due at 10:00');
+    assert.strictEqual(scheduler.due([{ ...daily, lastRun: now - 20 * 60000 }], now).length, 0, 'already ran today');
+    assert.strictEqual(scheduler.due([{ ...daily, days: [new Date(now).getDay() === 0 ? 1 : 0] }], now).length, 0, 'wrong weekday');
+    const once = { id: 'c', prompt: 'p', kind: 'once', at: now - 1000, createdAt: now - 5000 };
+    assert.strictEqual(scheduler.due([once], now).length, 1);
+    assert.strictEqual(scheduler.due([{ ...once, lastRun: now }], now).length, 0);
+    assert.strictEqual(scheduler.due([{ ...iv, enabled: false }], now).length, 0);
+    assert.strictEqual(scheduler.nextRun({ kind: 'daily', time: '25:00' }), null);
+  }
+  ok('scheduler: interval / daily (weekdays) / once due logic');
+
+  // 33. compaction: emoji cut in half by truncation must not produce invalid JSON (lone surrogate);
+  //     if the summary call fails, a mechanical digest still shrinks the context.
+  {
+    const emojiTool = 'x'.repeat(1499) + '😀😀😀'; // slice(0,1500) would split the first emoji
+    const msgs = [];
+    for (let i = 0; i < 12; i++) {
+      msgs.push({ role: 'user', content: 'task ' + i });
+      msgs.push({ role: 'assistant', content: '', tool_calls: [{ id: 'e' + i, type: 'function', function: { name: 'read_file', arguments: '{"path":"a"}' } }] });
+      msgs.push({ role: 'tool', tool_call_id: 'e' + i, content: emojiTool });
+      msgs.push({ role: 'assistant', content: 'ok 🎉 ' + i });
+    }
+    const before = requests.length;
+    const c33 = { id: 'cmp', messages: msgs.slice(), model: 'mock-a' };
+    assert(await agent.compactNow(c33, settings, () => {}));
+    const sent = JSON.stringify(requests.slice(before));
+    assert(!/\\ud[89ab][0-9a-f]{2}(?!\\ud[c-f])/i.test(sent), 'no lone high surrogate escapes sent');
+    assert(c33.messages[0]._summary && /SUMMARY OK/.test(c33.messages[0].content));
+
+    failModels.add('mock-a');
+    const log33 = [];
+    const c33b = { id: 'cmp2', messages: msgs.slice(), model: 'mock-a' };
+    assert(await agent.compactNow(c33b, settings, (t, p) => log33.push({ t, ...p })));
+    failModels.clear();
+    assert(/Automatic digest/.test(c33b.messages[0].content) && /USER: task 0/.test(c33b.messages[0].content));
+    assert(c33b.messages.length < msgs.length);
+    assert(log33.some((e) => /기계적 요약/.test(e.text || '')));
+  }
+  ok('compaction: no lone surrogates in request JSON; failed summary falls back to a mechanical digest');
 
   console.log(`\nAll ${pass} harness tests passed.`);
 }

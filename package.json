@@ -1,7 +1,7 @@
 {
   "name": "omniroute-desktop",
   "productName": "OmniRoute Desktop",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Coding agent desktop app powered by an OmniRoute (OpenAI-compatible) endpoint, with file access, shell and computer use.",
   "main": "src/main.js",
   "scripts": {

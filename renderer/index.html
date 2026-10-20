@@ -57,6 +57,9 @@
           </div>
           <select id="agent-select" title="커스텀 에이전트 (.agent.md)"></select>
           <span class="spacer"></span>
+          <button id="btn-undo" class="icon-btn" title="체크포인트: 에이전트 파일 변경 되돌리기">↶</button>
+          <button id="btn-bg" class="icon-btn" title="백그라운드 프로세스">⚙︎<span id="bg-count" class="badge-count hidden"></span></button>
+          <button id="btn-schedule" class="icon-btn" title="예약 작업 · 메모리">⏰</button>
           <button id="btn-export" class="icon-btn" title="현재 대화를 Markdown으로 내보내기">⤓</button>
           <button id="btn-theme" class="icon-btn" title="라이트/다크 테마 전환">◐</button>
           <button id="btn-extensions" class="btn ghost small" title="스킬 · 에이전트 · 프롬프트 · 플러그인 · MCP · 훅">🧩 확장</button>
@@ -179,6 +182,37 @@
         </label>
         <label class="check"><input id="set-apauto" type="checkbox" /> Autopilot 모드에서는 도구 승인 없이 자동 실행</label>
         <label class="check"><input id="set-outside" type="checkbox" /> 전체 권한 모드에서도 작업 폴더 밖 경로에 접근하는 명령은 승인 요청</label>
+        <h3 class="set-section">자율 실행 · 안전</h3>
+        <label class="check"><input id="set-block-danger" type="checkbox" /> 위험 명령 차단 (rm -rf /, git push --force, reset --hard, 디스크 포맷, publish 등 — Autopilot·전체 권한에서도 적용)</label>
+        <label class="check"><input id="set-checkpoints" type="checkbox" /> 파일 체크포인트 (에이전트가 수정·삭제한 파일을 실행 단위로 백업 → ↶ 되돌리기)</label>
+        <label>대체 모델 (쉼표 구분, 기본 모델 실패 시 순서대로 전환)
+          <input id="set-fallback" type="text" list="model-datalist" placeholder="예: model-b, model-c" />
+        </label>
+        <label>완료 검증 명령 (Autopilot의 task_complete 전에 실행, 실패하면 거부)
+          <input id="set-verify" type="text" placeholder="예: npm test" />
+        </label>
+        <label class="check"><input id="set-require-todos" type="checkbox" /> 열린 todo가 남아 있으면 Autopilot task_complete 거부</label>
+        <div class="grid2">
+          <label>실행당 토큰 예산 (0 = 무제한)
+            <input id="set-maxtokens-run" type="number" min="0" step="10000" />
+          </label>
+          <label>실행당 시간 예산 (분, 0 = 무제한)
+            <input id="set-maxminutes" type="number" min="0" />
+          </label>
+          <label>실행 오류 자동 재시도 횟수
+            <input id="set-retries" type="number" min="0" max="10" />
+          </label>
+          <label>연속 오류 경고 기준 (회)
+            <input id="set-errstreak" type="number" min="0" max="50" />
+          </label>
+        </div>
+        <label class="check"><input id="set-continue-steps" type="checkbox" /> Autopilot: 최대 스텝 도달 시 남은 작업이 있으면 압축 후 계속 (최대 2회)</label>
+        <label class="check"><input id="set-autoresume" type="checkbox" /> 앱 재시작 시 중단된 Autopilot 작업 자동 재개</label>
+        <label class="check"><input id="set-memory" type="checkbox" /> 장기 메모리 (memory 도구 · 시스템 프롬프트 주입)</label>
+        <label class="check"><input id="set-websearch" type="checkbox" /> 웹 검색 도구 (web_search)</label>
+        <label>검색 엔드포인트 (비우면 DuckDuckGo)
+          <input id="set-searchurl" type="text" placeholder="SearXNG 등 JSON: https://host/search?format=json&q={query}" />
+        </label>
         <h3 class="set-section">Computer Use · 백그라운드 작업 표시</h3>
         <label class="check"><input id="set-cu-minimize" type="checkbox" /> 화면 조작 시작 시 앱 창 최소화 (끝나도 포커스를 가져오지 않음)</label>
         <label class="check"><input id="set-cu-countdown-on" type="checkbox" /> 화면 조작 시작 전 카운트다운 알림 (취소 가능)
@@ -215,6 +249,18 @@
           <button class="etab" data-etab="instructions">지침</button>
         </div>
         <div id="ext-body"></div>
+      </div>
+    </div>
+
+    <!-- Generic tool modal (checkpoints, background processes, schedules, memory) -->
+    <div id="tool-modal" class="modal hidden">
+      <div class="modal-card wide">
+        <div class="row">
+          <h2 id="tool-modal-title" style="margin:0"></h2>
+          <span class="spacer"></span>
+          <button id="btn-tool-close" class="icon-btn">✕</button>
+        </div>
+        <div id="tool-modal-body" class="tool-modal-body"></div>
       </div>
     </div>
 

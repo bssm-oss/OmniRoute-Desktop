@@ -470,3 +470,14 @@ html[data-theme="light"] .empty h2 { background: linear-gradient(90deg, #161a26,
 html[data-theme="light"] .sugg { background: rgba(255,255,255,.85); color: var(--text); }
 html[data-theme="light"] .toast { background: rgba(255,255,255,.95); }
 html[data-theme="light"] .modal { background: rgba(20, 24, 40, .28); }
+
+/* Autonomy: checkpoints / background / schedules / memory */
+.tool-modal-body { max-height: 70vh; overflow: auto; display: flex; flex-direction: column; gap: 8px; }
+.tool-row { border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; display: flex; flex-direction: column; gap: 6px; }
+.tool-row.row { flex-direction: row; align-items: center; }
+.tool-row .row { align-items: center; gap: 6px; }
+.small { font-size: 12px; }
+.bg-out { max-height: 260px; overflow: auto; background: var(--bg3); padding: 8px; border-radius: 6px; font-size: 12px; white-space: pre-wrap; margin: 0; }
+#btn-bg { position: relative; }
+.badge-count { position: absolute; top: -2px; right: -2px; background: var(--accent, #4f8cff); color: #fff; border-radius: 8px; font-size: 10px; padding: 0 4px; line-height: 14px; }
+.notice.diag { text-align: left; border: 1px solid var(--border); border-radius: 8px; padding: 10px; color: var(--text); }

@@ -345,6 +345,60 @@ module.exports = async function drive({ win, app, store, activity }) {
     store.setSettings({ cuCountdown: false, confirmOutsideWorkspace: false });
     return ok || { ok: false, msg: JSON.stringify({ c: s.cuCountdown, n: s.cuCountdownSeconds, o: s.confirmOutsideWorkspace }) };
   });
+  await check('settings: autonomy/safety options have defaults and persist', async () => {
+    await js(`await loadSettings(); openSettings()`);
+    await waitFor(`!document.querySelector('#settings-modal').classList.contains('hidden')`);
+    const d = await js(`return ['#set-block-danger','#set-checkpoints','#set-require-todos','#set-continue-steps','#set-autoresume','#set-memory','#set-websearch'].map(s => document.querySelector(s).checked).concat([document.querySelector('#set-retries').value])`);
+    if (JSON.stringify(d) !== JSON.stringify([true, true, true, true, true, true, true, '2'])) return { ok: false, msg: 'defaults ' + JSON.stringify(d) };
+    await js(`document.querySelector('#set-fallback').value = 'm1, m2'; document.querySelector('#set-verify').value = 'npm test'; document.querySelector('#set-maxminutes').value = 30; document.querySelector('#btn-settings-save').click();`);
+    await waitFor(`document.querySelector('#settings-modal').classList.contains('hidden')`);
+    const s = store.getSettings();
+    const ok = JSON.stringify(s.fallbackModels) === '["m1","m2"]' && s.verifyCommand === 'npm test' && s.maxRunMinutes === 30;
+    store.setSettings({ fallbackModels: [], verifyCommand: '', maxRunMinutes: 0, confirmOutsideWorkspace: false, cuCountdown: false });
+    await js(`await loadSettings();`);
+    return ok || { ok: false, msg: JSON.stringify({ f: s.fallbackModels, v: s.verifyCommand, m: s.maxRunMinutes }) };
+  });
+  await check('checkpoint undo modal: agent edit is listed and restored', async () => {
+    const ws = store.getSettings().workspace;
+    fs.writeFileSync(path.join(ws, 'undo-me.txt'), 'before');
+    const prevPerm = store.getSettings().permissionMode;
+    store.setSettings({ permissionMode: 'full' });
+    await typeAndPress('WRITE undo-me.txt');
+    await waitFor(assistantHas('WRITE-DONE'), 20000);
+    await sleep(500);
+    store.setSettings({ permissionMode: prevPerm });
+    const changed = fs.readFileSync(path.join(ws, 'undo-me.txt'), 'utf8');
+    if (changed === 'before') return { ok: false, msg: 'mock did not write the file' };
+    await js(`document.querySelector('#btn-undo').click()`);
+    await waitFor(`document.querySelector('#tool-modal-body .tool-row button.danger')`);
+    await shot('20-checkpoints');
+    await js(`window.confirm = () => true; document.querySelector('#tool-modal-body .tool-row button.danger').click()`);
+    await sleep(800);
+    const restored = fs.readFileSync(path.join(ws, 'undo-me.txt'), 'utf8');
+    await js(`document.querySelector('#btn-tool-close').click()`);
+    return restored === 'before' || { ok: false, msg: 'content=' + restored };
+  });
+  await check('schedule modal: add, list, delete a schedule; memory section', async () => {
+    await js(`document.querySelector('#btn-schedule').click()`);
+    await waitFor(`document.querySelector('#sch-add')`);
+    await js(`document.querySelector('#sch-name').value='e2e sched'; document.querySelector('#sch-kind').value='interval'; document.querySelector('#sch-when').value='120'; document.querySelector('#sch-prompt').value='run tests'; document.querySelector('#sch-add').click();`);
+    await waitFor(`[...document.querySelectorAll('#tool-modal-body .tool-row b')].some(b => b.textContent.includes('e2e sched'))`);
+    const saved = (store.getSettings().schedules || []).find((x) => x.name === 'e2e sched');
+    if (!saved || saved.everyMinutes !== 120 || saved.mode !== 'autopilot') return { ok: false, msg: JSON.stringify(saved) };
+    await shot('21-schedules');
+    await js(`window.confirm = () => true; [...document.querySelectorAll('#tool-modal-body .tool-row')].find(r => r.textContent.includes('e2e sched')).querySelector('button.danger').click()`);
+    await sleep(500);
+    const gone = !(store.getSettings().schedules || []).some((x) => x.name === 'e2e sched');
+    const mem = await js(`return !!document.querySelector('#mem-add')`);
+    await js(`document.querySelector('#btn-tool-close').click()`);
+    return (gone && mem) || { ok: false, msg: JSON.stringify({ gone, mem }) };
+  });
+  await check('background process modal opens', async () => {
+    await js(`document.querySelector('#btn-bg').click()`);
+    await waitFor(`!document.querySelector('#tool-modal').classList.contains('hidden')`);
+    await js(`document.querySelector('#btn-tool-close').click()`);
+    return true;
+  });
   await check('approval request while minimized does not restore/focus the window', async () => {
     await typeAndPress('APPROVE please');
     win.minimize();

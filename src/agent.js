@@ -5,6 +5,9 @@ const harness = require('./harness');
 const mcp = require('./mcp');
 const { runHooks } = require('./hooks');
 const { redactText, redactArgs, containsSecret } = require('./redact');
+const memory = require('./memory');
+const safety = require('./safety');
+const background = require('./background');
 
 function normalizeBaseUrl(url) {
   let u = (url || '').trim().replace(/\/+$/, '');
@@ -66,6 +69,10 @@ function buildSystemPrompt(settings, { mode, agentDef, skills, todos, depth }) {
     '- For multi-step work keep a todo list with todo_write.',
     '- Be concise; use Markdown. Never fabricate file contents or command output.',
     '- Tool approvals are handled by the app. If a call is denied, adapt instead of retrying.',
+    '- Use bg_start for dev servers, watchers and other commands that do not exit on their own (never run them with run_command); read them with bg_output and stop them with bg_stop when done.',
+    '- Destructive commands (rm -rf of roots, force push, reset --hard, disk formatting, publishing, ...) are blocked by the app; find a safer alternative.',
+    '- If the same approach keeps failing, step back: re-read the error, inspect the code, and try a different strategy instead of repeating it.',
+    ...(settings.memoryEnabled !== false && depth === 0 ? ['- Use the `memory` tool to save durable facts worth knowing in future sessions (project conventions, build/test commands, user preferences).'] : []),
     '',
     `# Environment\n${os.type()} ${os.release()} (${process.platform}/${process.arch}); shell: ${process.platform === 'win32' ? 'Windows PowerShell 5 (no && / || operators; use ; and if ($?) {})' : process.env.SHELL || 'bash'}.`,
     `Home: ${os.homedir()}  |  Date: ${new Date().toISOString().slice(0, 10)}`,
@@ -100,6 +107,10 @@ function buildSystemPrompt(settings, { mode, agentDef, skills, todos, depth }) {
     L.push('', '# Computer use', 'Take a screenshot before interacting, use pixel coordinates from the latest screenshot and verify each step. Prefer keyboard shortcuts. The app window is minimized while you control the screen.');
   }
   if (settings.customInstructions && settings.customInstructions.trim()) L.push('', '# User custom instructions', settings.customInstructions.trim());
+  const mem = memory.promptSection(settings);
+  if (mem) L.push('', mem);
+  if (depth === 0 && mode === 'autopilot' && settings.verifyCommand && settings.verifyCommand.trim())
+    L.push('', `# Completion check\nBefore task_complete is accepted the app runs \`${settings.verifyCommand.trim()}\` in the workspace; it must succeed.`);
   if (todos && todos.length) L.push('', '# Current todo list', ...todos.map((t) => `- [${t.status}] ${t.title}`));
   return L.join('\n');
 }
@@ -149,6 +160,26 @@ async function* sseStream(res, signal) {
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+// Lone UTF-16 surrogates (e.g. an emoji cut in half by .slice) become "\udXXX" escapes in JSON,
+// which strict servers reject ("unexpected end of hex escape"). Replace them with U+FFFD.
+const LONE_SURROGATE = /[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/g;
+function wellFormed(s) {
+  return typeof s === 'string' ? s.replace(LONE_SURROGATE, '\ufffd') : s;
+}
+function jsonBody(obj) {
+  return JSON.stringify(obj, (_k, v) => (typeof v === 'string' ? wellFormed(v) : v));
+}
+// Slice without splitting a surrogate pair at either end.
+function safeSlice(s, start, end) {
+  s = String(s || '');
+  const n = s.length;
+  let a = start === undefined ? 0 : start < 0 ? Math.max(0, n + start) : Math.min(start, n);
+  let b = end === undefined ? n : end < 0 ? Math.max(0, n + end) : Math.min(end, n);
+  if (a > 0 && a < n && /[\udc00-\udfff]/.test(s[a]) && /[\ud800-\udbff]/.test(s[a - 1])) a++;
+  if (b > 0 && b < n && /[\udc00-\udfff]/.test(s[b]) && /[\ud800-\udbff]/.test(s[b - 1])) b--;
+  return a < b ? s.slice(a, b) : '';
+}
+
 async function fetchWithRetry(url, init, signal, emit) {
   let lastErr;
   for (let attempt = 0; attempt < 4; attempt++) {
@@ -186,7 +217,7 @@ async function chatCompletion(settings, model, messages, tools, signal, emit) {
 
   const res = await fetchWithRetry(
     normalizeBaseUrl(settings.baseUrl) + '/chat/completions',
-    { method: 'POST', headers: { ...headers(settings), Accept: 'text/event-stream' }, body: JSON.stringify(body) },
+    { method: 'POST', headers: { ...headers(settings), Accept: 'text/event-stream' }, body: jsonBody(body) },
     signal,
     emit
   );
@@ -259,7 +290,7 @@ async function chatCompletion(settings, model, messages, tools, signal, emit) {
 async function simpleCompletion(settings, model, messages, maxTokens, signal) {
   const res = await fetchWithRetry(
     normalizeBaseUrl(settings.baseUrl) + '/chat/completions',
-    { method: 'POST', headers: headers(settings), body: JSON.stringify({ model, stream: false, max_tokens: maxTokens, messages }) },
+    { method: 'POST', headers: headers(settings), body: jsonBody({ model, stream: false, max_tokens: maxTokens, messages }) },
     signal || new AbortController().signal
   );
   if (!res.ok) throw new Error(`HTTP ${res.status}: ${(await res.text()).slice(0, 500)}`);
@@ -343,6 +374,23 @@ function estimateContext(conv, systemTokens) {
   return estimateTokens(conv.messages) + systemTokens;
 }
 
+// Fallback summary without a model call: user requests, assistant conclusions and tool calls (trimmed).
+function mechanicalDigest(msgs) {
+  const L = ['(Automatic digest — the model summary was unavailable.)'];
+  for (const m of msgs) {
+    const c = typeof m.content === 'string' ? m.content : (m.content || []).map((p) => p.text || '').join(' ');
+    if (m.role === 'user' && !m._auto) L.push(`USER: ${safeSlice(c, 0, 1500)}`);
+    else if (m.role === 'user' && m._summary) L.push(safeSlice(c, 0, 6000));
+    else if (m.role === 'assistant') {
+      if (c && c.trim()) L.push(`ASSISTANT: ${safeSlice(c.trim(), 0, 600)}`);
+      for (const t of m.tool_calls || []) L.push(`  -> ${t.function.name}(${safeSlice(t.function.arguments, 0, 160)})`);
+    } else if (m.role === 'tool' && m._isError) L.push(`  ! error: ${safeSlice(c, 0, 200)}`);
+  }
+  let out = L.join('\n');
+  if (out.length > 40000) out = L[0] + '\n…\n' + safeSlice(out, -40000);
+  return out;
+}
+
 async function maybeCompact(conv, settings, model, systemTokens, signal, emit, force = false) {
   const limit = Number(settings.contextLimit) || 128000;
   const used = estimateContext(conv, systemTokens);
@@ -360,25 +408,42 @@ async function maybeCompact(conv, settings, model, systemTokens, signal, emit, f
   const transcript = head
     .map((m) => {
       const c = typeof m.content === 'string' ? m.content : (m.content || []).map((p) => p.text || '[image]').join('\n');
-      const calls = m.tool_calls ? '\n' + m.tool_calls.map((t) => `-> ${t.function.name}(${t.function.arguments.slice(0, 400)})`).join('\n') : '';
-      return `[${m.role}] ${(c || '').slice(0, m.role === 'tool' ? 1500 : 6000)}${calls}`;
+      const calls = m.tool_calls ? '\n' + m.tool_calls.map((t) => `-> ${t.function.name}(${safeSlice(t.function.arguments, 0, 400)})`).join('\n') : '';
+      return `[${m.role}] ${safeSlice(c, 0, m.role === 'tool' ? 1500 : 6000)}${calls}`;
     })
-    .join('\n\n')
-    .slice(-300000);
-  const summary = await simpleCompletion(
+    .join('\n\n');
+  const transcriptSafe = safeSlice(transcript, -300000);
+  const summarize = (m) => simpleCompletion(
     settings,
-    model,
+    m,
     [
       {
         role: 'system',
         content:
           'Summarize this agent session transcript so work can continue seamlessly. Include: the user\'s goals and requirements (verbatim where important), decisions, files created/modified with key details, commands run and results, current state, open problems, and next steps. Be dense and precise.'
       },
-      { role: 'user', content: transcript }
+      { role: 'user', content: transcriptSafe }
     ],
     4000,
     signal
   );
+  let summary = null;
+  let lastErr = null;
+  for (const m of [model, ...fallbackList(settings, model)]) {
+    try {
+      summary = await summarize(m);
+      if (summary) break;
+    } catch (e) {
+      if (signal.aborted) throw e;
+      lastErr = e;
+    }
+  }
+  if (!summary) {
+    // Model summary failed: fall back to a mechanical digest so the context still shrinks
+    // (otherwise every following step retries and fails again while the context keeps growing).
+    emit('notice', { text: `⚠ 요약 모델 호출 실패 (${String((lastErr && lastErr.message) || 'empty summary').slice(0, 200)}) — 기계적 요약으로 압축합니다.` });
+    summary = mechanicalDigest(head);
+  }
   const tail = msgs.slice(cut);
   const head2 = [{ role: 'user', _auto: true, _summary: true, content: `[Summary of earlier conversation]\n${summary}` }];
   // Keep strict user/assistant alternation regardless of what the tail starts with.
@@ -457,6 +522,99 @@ function waitInfo(name, args) {
   return null;
 }
 
+const numSetting = (v, d) => (v === '' || v === null || v === undefined || !Number.isFinite(Number(v)) ? d : Number(v));
+
+function fallbackList(settings, model) {
+  const raw = Array.isArray(settings.fallbackModels) ? settings.fallbackModels : String(settings.fallbackModels || '').split(/[,\n]/);
+  return raw.map((s) => String(s).trim()).filter((s) => s && s !== model);
+}
+
+// Errors where switching to another model might help (not user aborts or local bugs).
+function retriableModelError(e) {
+  const m = String((e && e.message) || e);
+  if (/abort/i.test((e && e.name) || '') || /aborted/i.test(m)) return false;
+  return /HTTP (?:4(?:00|04|08|09|13|22|24|29)|5\d\d)|fetch failed|network|ECONN|ETIMEDOUT|ENOTFOUND|socket|stream|terminated|model/i.test(m);
+}
+
+/** Call the model; on failure try the configured fallback models in order (and stay on the one that works). */
+async function callModel(state, settings, messages, tools, signal, emit) {
+  const chain = [state.model, ...fallbackList(settings, state.model)];
+  let lastErr;
+  for (let i = 0; i < chain.length; i++) {
+    try {
+      const r = await chatCompletion(settings, chain[i], messages, tools, signal, emit);
+      if (i > 0) {
+        state.model = chain[i];
+        emit('notice', { text: `🔁 대체 모델로 전환: ${chain[i]}` });
+        emit('model_switched', { model: chain[i] });
+      }
+      return r;
+    } catch (e) {
+      lastErr = e;
+      if (signal.aborted || !retriableModelError(e) || i === chain.length - 1) throw e;
+      emit('notice', { text: `⚠ ${chain[i]} 실패 (${String(e.message).slice(0, 160)}) → ${chain[i + 1]} 로 재시도` });
+    }
+  }
+  throw lastErr;
+}
+
+// Detects the agent going in circles: identical calls with identical results, or long error streaks.
+function makeRepeatTracker() {
+  const seen = new Map();
+  let errStreak = 0;
+  return {
+    check(name, argsStr, resultText, isError) {
+      const key = name + '|' + argsStr + '|' + String(resultText).slice(0, 2000);
+      const n = (seen.get(key) || 0) + 1;
+      seen.set(key, n);
+      if (seen.size > 500) seen.delete(seen.keys().next().value);
+      errStreak = isError ? errStreak + 1 : 0;
+      if (name === 'wait' || name === 'bg_output' || name === 'computer') return null;
+      if (n >= 3) return `[Loop detector] This exact call has now returned the same result ${n} times. Repeating it will not help — change approach (inspect the cause, try a different command/tool, or re-plan).`;
+      return null;
+    },
+    streak: () => errStreak,
+    resetStreak() {
+      errStreak = 0;
+    }
+  };
+}
+
+function diagnosis(conv, reason, stats) {
+  const open = (conv.todos || []).filter((t) => t.status !== 'done');
+  const lastErr = [...conv.messages].reverse().find((m) => m.role === 'tool' && m._isError);
+  const L = [`⛔ 자동 진행 중단 — ${reason}`, `· 진행: ${stats.steps} 스텝, ${Math.round((Date.now() - stats.t0) / 60000)}분, ~${stats.tokens.toLocaleString()} 토큰`];
+  if (open.length) L.push(`· 남은 todo: ${open.map((t) => t.title).join('; ')}`);
+  if (lastErr) L.push(`· 마지막 오류: ${String(lastErr.content).replace(/\s+/g, ' ').slice(0, 300)}`);
+  L.push('메시지를 보내면 이어서 진행합니다.');
+  return L.join('\n');
+}
+
+/** Pre-completion verification for autopilot task_complete. Returns null if OK, else a rejection message. */
+async function verifyCompletion(opts) {
+  const { conv, settings, signal } = opts;
+  if (settings.requireTodosDone !== false) {
+    const open = (conv.todos || []).filter((t) => t.status !== 'done' && t.status !== 'blocked');
+    if (open.length) return `task_complete rejected: ${open.length} todo(s) are not done: ${open.map((t) => `"${t.title}" [${t.status}]`).join(', ')}. Finish them (or update the todo list if they no longer apply), then call task_complete again.`;
+  }
+  const cmd = (settings.verifyCommand || '').trim();
+  if (cmd) {
+    opts.hooks.emit('notice', { text: `🧪 완료 검증 실행: ${cmd}` });
+    let out;
+    try {
+      out = await executeTool('run_command', { command: cmd, timeout_seconds: numSetting(settings.verifyTimeout, 600) }, settings, { signal });
+    } catch (e) {
+      out = { text: 'Error: ' + e.message, isError: true };
+    }
+    const text = String(out.text || '');
+    const code = /\[exit code: (-?\d+)\]/.exec(text);
+    const failed = out.isError || /^Error:/.test(text) || (code && code[1] !== '0') || /timed out/i.test(text.slice(-300));
+    if (failed) return `task_complete rejected: the verification command \`${cmd}\` failed. Fix the problems and call task_complete again.\n\n${text.slice(-6000)}`;
+    opts.hooks.emit('notice', { text: '✅ 완료 검증 통과' });
+  }
+  return null;
+}
+
 /**
  * Generic loop shared by main agent and subagents.
  * opts: { conv, settings, signal, hooks, mode, agentDef, depth, model, allowedTools }
@@ -473,19 +631,42 @@ async function loop(opts) {
   const toolsTokens = textTokens(JSON.stringify(tools));
   const allHooks = custom.discoverHooks(settings);
   const alwaysAllowed = hooks.alwaysAllowed || new Set();
-  const maxSteps = Math.max(1, Number(settings.maxSteps) || 50) * (mode === 'autopilot' ? 4 : 1);
+  let maxSteps = Math.max(1, Number(settings.maxSteps) || 50) * (mode === 'autopilot' ? 4 : 1);
   const autoApprove = opts.autoApprove ?? (mode === 'autopilot' && settings.autopilotAutoApprove !== false);
+  const state = { model };
+  const repeats = makeRepeatTracker();
+  const stats = { t0: Date.now(), tokens: 0, steps: 0 };
+  // Budgets apply to top-level autopilot/agent runs (0 = unlimited).
+  const tokenBudget = depth === 0 ? numSetting(settings.maxRunTokens, 0) : 0;
+  const timeBudgetMs = depth === 0 ? numSetting(settings.maxRunMinutes, 0) * 60000 : 0;
+  const extensions = { left: depth === 0 && mode === 'autopilot' && settings.continueAfterMaxSteps !== false ? numSetting(settings.maxStepExtensions, 2) : 0 };
+  // One checkpoint per top-level run (subagents write into the parent's checkpoint).
+  const checkpoint = opts.checkpoint || (depth === 0 && conv.id ? { convId: conv.id, turn: safety.newTurnId(), label: lastUserText(conv) } : null);
+  opts = { ...opts, checkpoint };
   let nudges = 0;
   let lastText = '';
+  const stopWith = (reason) => {
+    const text = diagnosis(conv, reason, stats);
+    emit('notice', { text });
+    emit('run_diagnosis', { text, reason });
+    // Persist so the report survives the re-render at run end (and the model sees why it stopped).
+    conv.messages.push({ role: 'assistant', content: text, _diag: true });
+    hooks.save(conv);
+    return { completed: false, lastText, stopReason: reason };
+  };
 
   for (let step = 0; step < maxSteps; step++) {
     if (signal.aborted) return { completed: false, lastText };
+    stats.steps++;
+    if (tokenBudget && stats.tokens >= tokenBudget) return stopWith(`토큰 예산(${tokenBudget.toLocaleString()}) 소진`);
+    if (timeBudgetMs && Date.now() - stats.t0 >= timeBudgetMs) return stopWith(`시간 예산(${Math.round(timeBudgetMs / 60000)}분) 소진`);
     const system = buildSystemPrompt(settings, { mode, agentDef, skills, todos: conv.todos, depth });
     const fixedTokens = textTokens(system) + toolsTokens;
-    if (await maybeCompact(conv, settings, model, fixedTokens, signal, emit).catch((e) => (emit('notice', { text: '압축 실패: ' + e.message }), false))) hooks.save(conv);
+    if (await maybeCompact(conv, settings, state.model, fixedTokens, signal, emit).catch((e) => (emit('notice', { text: '압축 실패: ' + e.message }), false))) hooks.save(conv);
     emit('assistant_start', { step });
     conv.messages = repairToolPairs(conv.messages);
-    const { message, usage, finish } = await chatCompletion(settings, model, [{ role: 'system', content: system }, ...conv.messages], tools, signal, emit);
+    const { message, usage, finish } = await callModel(state, settings, [{ role: 'system', content: system }, ...conv.messages], tools, signal, emit);
+    if (usage) stats.tokens += (usage.prompt_tokens || 0) + (usage.completion_tokens || 0);
     if (usage && usage.prompt_tokens) calibrate(conv, conv.messages.length, usage.prompt_tokens);
     // Secrets typed via Computer Use are kept only in memory for the action itself; the stored
     // conversation, UI, hooks and later model turns see a masked value.
@@ -542,6 +723,7 @@ async function loop(opts) {
         message._plan = true;
         hooks.save(conv);
       }
+      if (mode === 'autopilot' && depth === 0) return stopWith(`재촉 ${nudges}회 후에도 task_complete 없이 턴을 종료함`);
       return { completed: mode !== 'autopilot', lastText };
     }
     nudges = 0;
@@ -582,9 +764,18 @@ async function loop(opts) {
         } else if (pre.updatedInput) args = pre.updatedInput;
       }
       if (!isError) {
+        // Hard safety rail: enforced in every mode, including Autopilot and full access.
+        const danger = safety.dangerousCall(name, args, settings);
+        if (danger) {
+          resultText = `Blocked by OmniRoute safety policy: ${danger}. This command is not allowed to run automatically. Use a safer, reversible alternative (e.g. delete a specific subfolder, use --force-with-lease, commit/stash first). If it is truly required, tell the user to run it manually.`;
+          isError = true;
+          emit('notice', { text: `🛡 위험 명령 차단: ${danger}` });
+        }
+      }
+      if (!isError) {
         let decision = 'allow';
         const effSettings = autoApprove ? { ...settings, permissionMode: 'full', confirmOutsideWorkspace: false } : settings;
-        const outside = name === 'run_command' ? commandOutsidePaths(settings.workspace, args) : [];
+        const outside = name === 'run_command' || name === 'bg_start' ? commandOutsidePaths(settings.workspace, args) : [];
         // "Always allow" for run_command does not cover commands that reach outside the workspace.
         const always = alwaysAllowed.has(name) && !outside.length;
         if (!NO_APPROVAL.has(name) && needsApproval(name, args, effSettings) && !always) {
@@ -664,9 +855,32 @@ async function loop(opts) {
         } else results.push(await runOne(c));
       }
     }
+    const warnings = [];
     for (const r of results) {
+      const warn = repeats.check(r.call.function.name, r.call.function.arguments, r.resultText, r.isError);
+      if (warn && !warnings.includes(warn)) warnings.push(warn);
       conv.messages.push({ role: 'tool', tool_call_id: r.call.id, content: String(r.resultText), _isError: r.isError || undefined });
       if (r.image) pendingImages.push(r.image);
+    }
+    const maxErr = numSetting(settings.maxErrorStreak, 8);
+    if (maxErr > 0 && repeats.streak() >= maxErr) {
+      warnings.push(`[Loop detector] The last ${repeats.streak()} tool calls all failed. Stop and diagnose: summarize what you tried, why it failed, and choose a fundamentally different approach.`);
+      repeats.resetStreak();
+    }
+    if (warnings.length) emit('notice', { text: '🔄 반복 감지: 접근 방식 변경을 요청했습니다.' });
+    // Autopilot completion gate: open todos / verification command must pass.
+    if (completedSummary !== null && depth === 0 && mode === 'autopilot' && !signal.aborted) {
+      const reject = await verifyCompletion(opts);
+      if (reject) {
+        const tc = results.find((r) => r.call.function.name === 'task_complete');
+        const tm = tc && conv.messages.find((m) => m.role === 'tool' && m.tool_call_id === tc.call.id);
+        if (tm) {
+          tm.content = reject;
+          tm._isError = true;
+        }
+        emit('notice', { text: '🚫 task_complete 거부: ' + reject.split('\n')[0].slice(0, 240) });
+        completedSummary = null;
+      }
     }
     if (pendingImages.length) {
       conv.messages.push({
@@ -675,6 +889,7 @@ async function loop(opts) {
         content: [{ type: 'text', text: 'Image result(s) of the last tool call(s):' }, ...pendingImages.map((url) => ({ type: 'image_url', image_url: { url }, _screenshot: true }))]
       });
     }
+    if (warnings.length) conv.messages.push({ role: 'user', _auto: true, content: warnings.join('\n') });
     // Tool-call boundary: inject user steering messages so the next model call sees them.
     const steered = depth === 0 && injectSteers(conv, hooks);
     hooks.save(conv);
@@ -682,9 +897,26 @@ async function loop(opts) {
       emit('task_complete', { summary: completedSummary });
       return { completed: true, summary: completedSummary, lastText: completedSummary };
     }
+    // Step limit reached in autopilot with work remaining: compact and keep going (bounded).
+    if (step === maxSteps - 1 && extensions.left > 0 && !signal.aborted) {
+      const open = (conv.todos || []).filter((t) => t.status !== 'done');
+      if (open.length || !conv.todos || !conv.todos.length) {
+        extensions.left--;
+        maxSteps += Math.max(10, Math.round(maxSteps / 2));
+        emit('notice', { text: `⏩ 최대 스텝 도달 — 남은 작업이 있어 컨텍스트를 압축하고 계속합니다 (한도 ${maxSteps})` });
+        if (await maybeCompact(conv, settings, state.model, fixedTokens, signal, emit, true).catch(() => false)) hooks.save(conv);
+      }
+    }
   }
+  if (mode === 'autopilot' && depth === 0) return stopWith(`최대 스텝(${maxSteps}) 도달`);
   emit('notice', { text: `최대 스텝(${maxSteps})에 도달해 중지했습니다. 메시지를 보내면 계속합니다.` });
   return { completed: false, lastText };
+}
+
+function lastUserText(conv) {
+  const u = [...(conv.messages || [])].reverse().find((m) => m.role === 'user' && !m._auto);
+  if (!u) return '';
+  return (typeof u.content === 'string' ? u.content : (u.content || []).map((p) => p.text || '').join(' ')).replace(/\s+/g, ' ').slice(0, 120);
 }
 
 async function dispatch(name, args, call, opts, agentTypes) {
@@ -715,6 +947,8 @@ async function dispatch(name, args, call, opts, agentTypes) {
       if (name.startsWith('mcp__')) return mcp.callTool(name, args, { signal });
       return executeTool(name, args, settings, {
         signal,
+        checkpoint: opts.checkpoint,
+        owner: String(conv.id || '').split(':')[0],
         onOutput: (chunk) => hooks.emit('tool_output', { id: call.id, chunk }),
         beforeComputer: hooks.beforeComputer
       });
@@ -730,7 +964,7 @@ async function runSubagent(args, call, parentOpts, agentTypes) {
   const mode = parentOpts.mode === 'ask' || parentOpts.mode === 'plan' ? 'plan' : 'agent';
   let allowed = def.tools;
   if (mode === 'plan') allowed = harness.READ_ONLY_TOOLS;
-  const model = parentOpts.settings.subagentModel || def.model || parentOpts.model;
+  const model = (args.model && String(args.model).trim()) || parentOpts.settings.subagentModel || def.model || parentOpts.model;
   const subHooks = {
     ...parentOpts.hooks,
     save: () => {},
@@ -744,7 +978,7 @@ async function runSubagent(args, call, parentOpts, agentTypes) {
     }
   };
   parentEmit('tool_output', { id: call.id, chunk: `🤖 ${def.name} (${model})\n` });
-  const r = await loop({ conv: subConv, settings: parentOpts.settings, signal: parentOpts.signal, hooks: subHooks, mode, agentDef: def, depth: 1, model, allowedTools: allowed,
+  const r = await loop({ conv: subConv, settings: parentOpts.settings, signal: parentOpts.signal, hooks: subHooks, mode, agentDef: def, depth: 1, model, allowedTools: allowed, checkpoint: parentOpts.checkpoint,
     autoApprove: parentOpts.mode === 'autopilot' && parentOpts.settings.autopilotAutoApprove !== false });
   const report = r.lastText || '(subagent returned no text)';
   return { text: `[${def.name} subagent report]\n${report}` };
